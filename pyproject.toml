@@ -59,6 +59,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["N802", "N803"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["ai_mt5"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
