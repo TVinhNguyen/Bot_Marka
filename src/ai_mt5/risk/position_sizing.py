@@ -13,8 +13,8 @@ or market state directly; the :class:`RiskManager` composes those inputs.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+from decimal import ROUND_FLOOR, Decimal
 
 
 @dataclass(frozen=True)
@@ -31,9 +31,20 @@ class SizingResult:
 
 
 def _round_to_step(value: float, step: float) -> float:
+    """Floor ``value`` to the nearest multiple of ``step``, in decimal.
+
+    Using :class:`Decimal` avoids IEEE-754 quirks that make e.g.
+    ``math.floor(0.29 / 0.01)`` return ``28`` (yielding ``0.28``) instead
+    of the expected ``29`` -> ``0.29``.
+    """
     if step <= 0:
         raise ValueError("step must be positive")
-    return math.floor(value / step) * step
+    if value <= 0:
+        return 0.0
+    dv = Decimal(str(value))
+    ds = Decimal(str(step))
+    multiples = (dv / ds).quantize(Decimal("1"), rounding=ROUND_FLOOR)
+    return float(multiples * ds)
 
 
 def size_position(

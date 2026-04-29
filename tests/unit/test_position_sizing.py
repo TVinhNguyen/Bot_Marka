@@ -6,7 +6,17 @@ import math
 
 import pytest
 
-from ai_mt5.risk.position_sizing import size_position
+from ai_mt5.risk.position_sizing import _round_to_step, size_position
+
+
+def test_round_to_step_is_decimal_exact() -> None:
+    """0.29 / 0.01 is 28.999... in IEEE-754; ensure we still floor to 0.29."""
+    assert _round_to_step(0.29, 0.01) == pytest.approx(0.29, abs=1e-12)
+    assert _round_to_step(0.30, 0.01) == pytest.approx(0.30, abs=1e-12)
+    assert _round_to_step(0.305, 0.01) == pytest.approx(0.30, abs=1e-12)
+    assert _round_to_step(0.07, 0.01) == pytest.approx(0.07, abs=1e-12)
+    # 0.7 / 0.1 is also affected by IEEE-754 (= 6.999...).
+    assert _round_to_step(0.7, 0.1) == pytest.approx(0.7, abs=1e-12)
 
 
 @pytest.fixture
