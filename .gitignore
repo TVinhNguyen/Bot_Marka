@@ -22,11 +22,11 @@ coverage.xml
 uv.lock
 poetry.lock
 
-# Project artifacts
-logs/
-audit/
-data/predictions/
-reports/
+# Project artifacts (runtime output dirs at the repo root)
+/logs/
+/audit/
+/data/predictions/
+/reports/
 *.log
 
 # OS / editor
