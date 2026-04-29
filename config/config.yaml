@@ -1,0 +1,61 @@
+# Validated by src/ai_mt5/config/loader.py via pydantic.
+# Only sections needed by the dry_run skeleton, baseline forecast, and risk
+# gate are included; deeper sections (model adapters, agents, ensemble) will
+# arrive in later issues.
+
+environment:
+  mode: ${ENV:dry_run}
+  timezone: "UTC"
+  log_level: "INFO"
+
+symbols:
+  - symbol: "EURUSD"
+    timeframe: "M15"
+    enabled: true
+    spread_max_points: 25
+  - symbol: "XAUUSD"
+    timeframe: "M15"
+    enabled: false
+    spread_max_points: 60
+
+storage:
+  backend: "jsonl"
+  bars_path: "data/bars"
+  forecasts_path: "data/predictions"
+  audit_path: "audit"
+
+risk:
+  base_risk_per_trade: 0.002
+  max_risk_per_trade:  0.005
+  min_risk_per_trade:  0.0005
+  max_daily_loss:      0.02
+  max_total_drawdown:  0.08
+  max_positions_per_symbol: 1
+  max_total_positions:      3
+  max_trades_per_day:       5
+  max_consecutive_losses:   3
+
+  sl_atr_min: 1.2
+  sl_atr_max: 2.5
+  tp_atr:     2.0
+  rr_min:     1.0
+  margin_safety: 0.8
+
+  spread_max_points:
+    EURUSD: 25
+    XAUUSD: 60
+
+  news_window_minutes:
+    high:   [-30, 30]
+    medium: [-10, 15]
+    low:    [0, 0]
+
+  kill_switch_file: "/var/run/ai-mt5/STOP"
+  kill_switch_enabled: true
+
+execution:
+  dry_run: true
+  deviation_points: 20
+  magic: 26042901
+  order_comment: "ai-mt5-mm"
+  reconcile_on_start: true
