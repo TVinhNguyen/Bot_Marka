@@ -106,6 +106,29 @@ def test_news_window_blocks_trade(app_config, account_snapshot, market_snapshot)
     assert "news_window_high" in decision.rejected_by
 
 
+def test_news_window_collects_all_matching_impacts(
+    app_config, account_snapshot, market_snapshot
+) -> None:
+    """Multiple overlapping news windows must all surface in the audit trail."""
+    mgr = _make_manager(app_config)
+    high = NewsEvent(
+        symbol="EURUSD",
+        impact="high",
+        scheduled_at=market_snapshot.timestamp + timedelta(minutes=10),
+    )
+    medium = NewsEvent(
+        symbol="EURUSD",
+        impact="medium",
+        scheduled_at=market_snapshot.timestamp + timedelta(minutes=5),
+    )
+    decision = mgr.evaluate(
+        _signal("BUY"), account_snapshot, market_snapshot, news=[high, medium]
+    )
+    assert not decision.approved
+    assert "news_window_high" in decision.rejected_by
+    assert "news_window_medium" in decision.rejected_by
+
+
 def test_news_window_outside_does_not_block(app_config, account_snapshot, market_snapshot) -> None:
     mgr = _make_manager(app_config)
     event = NewsEvent(

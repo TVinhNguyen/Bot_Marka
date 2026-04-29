@@ -165,6 +165,7 @@ class RiskManager:
         if not news:
             return []
         ref = now or market.timestamp
+        out: list[str] = []
         for event in news:
             if event.symbol != market.symbol:
                 continue
@@ -175,5 +176,7 @@ class RiskManager:
             start = event.scheduled_at + timedelta(minutes=before)
             end = event.scheduled_at + timedelta(minutes=after)
             if start <= ref <= end:
-                return [f"news_window_{event.impact}"]
-        return []
+                reason = f"news_window_{event.impact}"
+                if reason not in out:
+                    out.append(reason)
+        return out
