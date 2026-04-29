@@ -74,6 +74,18 @@ def test_kill_switch_forces_reject(app_config, account_snapshot, market_snapshot
     assert "kill_switch_engaged" in decision.rejected_by
 
 
+def test_kill_switch_disabled_in_config_skips_check(
+    app_config, account_snapshot, market_snapshot
+) -> None:
+    """Setting kill_switch_enabled=False must bypass the kill switch entirely."""
+    risk_cfg = app_config.risk.model_copy(update={"kill_switch_enabled": False})
+    cfg = app_config.model_copy(update={"risk": risk_cfg})
+    mgr = _make_manager(cfg, kill=InMemoryKillSwitch(engaged=True))
+    decision = mgr.evaluate(_signal("BUY"), account_snapshot, market_snapshot)
+    assert decision.approved
+    assert "kill_switch_engaged" not in decision.rejected_by
+
+
 def test_clearing_kill_switch_unblocks(app_config, account_snapshot, market_snapshot) -> None:
     kill = InMemoryKillSwitch(engaged=True)
     mgr = _make_manager(app_config, kill=kill)

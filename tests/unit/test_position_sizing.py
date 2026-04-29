@@ -63,6 +63,23 @@ def test_volume_capped_to_volume_max(base_kwargs) -> None:
     assert res.volume == pytest.approx(1.0, abs=1e-6)
 
 
+def test_volume_max_below_step_rejects_with_reason() -> None:
+    """volume_max < volume_step must reject explicitly, never return volume=0 silently."""
+    res = size_position(
+        equity=10_000.0,
+        base_risk_pct=0.002,
+        min_risk_pct=0.0005,
+        max_risk_pct=0.005,
+        sl_distance_price=0.0010,
+        contract_size=100_000.0,
+        volume_min=0.01,
+        volume_max=0.005,  # smaller than volume_step
+        volume_step=0.01,
+    )
+    assert not res.approved
+    assert res.rejected_by, "rejected SizingResult must list at least one reason"
+
+
 def test_risk_exceeds_max_cap_after_step_rounding() -> None:
     """If even the smallest stepped volume puts realized risk above the cap, reject."""
     # equity=1000, max_risk_pct=0.0001 -> max risk = $0.10

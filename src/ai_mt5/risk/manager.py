@@ -52,7 +52,7 @@ class RiskManager:
     ) -> RiskDecision:
         rejected: list[str] = []
 
-        if self._kill.is_engaged():
+        if self._cfg.kill_switch_enabled and self._kill.is_engaged():
             rejected.append("kill_switch_engaged")
 
         rejected.extend(self._check_signal(signal))

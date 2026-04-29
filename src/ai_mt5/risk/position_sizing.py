@@ -80,6 +80,9 @@ def size_position(
         stepped = 0.0
     if stepped > volume_max:
         stepped = _round_to_step(volume_max, volume_step)
+        if stepped < volume_min:
+            rejected.append("volume_below_min_after_cap")
+            stepped = 0.0
 
     actual_risk = stepped * sl_distance_price * contract_size
     if stepped > 0 and actual_risk > equity * max_risk_pct:
