@@ -121,9 +121,7 @@ def test_news_window_collects_all_matching_impacts(
         impact="medium",
         scheduled_at=market_snapshot.timestamp + timedelta(minutes=5),
     )
-    decision = mgr.evaluate(
-        _signal("BUY"), account_snapshot, market_snapshot, news=[high, medium]
-    )
+    decision = mgr.evaluate(_signal("BUY"), account_snapshot, market_snapshot, news=[high, medium])
     assert not decision.approved
     assert "news_window_high" in decision.rejected_by
     assert "news_window_medium" in decision.rejected_by
