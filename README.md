@@ -65,11 +65,35 @@ forecast -> ensemble -> cost filter -> risk manager -> order_check -> order_send
 
 - [x] Blueprint design (file gốc)
 - [x] Documentation set (folder này)
-- [ ] Giai đoạn 1: MT5 skeleton
-- [ ] Giai đoạn 2: Baseline + logging
-- [ ] Giai đoạn 3-6: Model adapters offline
-- [ ] Giai đoạn 7: Ensemble backtest
-- [ ] Giai đoạn 8: Paper / demo
-- [ ] Giai đoạn 9: Live nhỏ
+- [x] Giai đoạn 1: MT5 skeleton (dry_run, audit trail, trace IDs)
+- [x] Giai đoạn 2: Baseline forecast + Closed Bar fixture pipeline
+- [x] Giai đoạn 4: Risk Decision gate (sizing, SL/TP, kill switch, news)
+- [ ] Giai đoạn 3: MT5 demo preflight + order_check (issue #3)
+- [ ] Giai đoạn 5-9: data store, model adapters, ensemble, shadow, live
 
 Tham khảo [13-roadmap.md](13-roadmap.md) để xem milestone chi tiết.
+
+---
+
+## Quickstart
+
+```bash
+# Install dev deps (Python 3.11+)
+uv venv && . .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# Run a single dry_run tick against the EURUSD M15 fixture.
+ai-mt5 dry-run-tick \
+  --config config/config.yaml \
+  --bars data/fixtures/bars/EURUSD_M15.csv
+
+# Run the test suite, lint, typecheck.
+pytest
+ruff check src tests
+ruff format --check src tests
+mypy src
+```
+
+Audit records land in `audit/audit.jsonl` and forecasts in
+`data/predictions/forecasts.jsonl` by default — both paths are configurable in
+`config/config.yaml` under the `storage:` section.
