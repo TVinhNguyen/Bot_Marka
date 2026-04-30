@@ -59,3 +59,15 @@ execution:
   magic: 26042901
   order_comment: "ai-mt5-mm"
   reconcile_on_start: true
+
+# Issue #6: tunable thresholds for the market-data quality gates.
+data_quality:
+  gap_tolerance: 0.1
+  return_outlier_mad_multiple: 8.0
+  return_outlier_min_samples: 20
+  stale_after_bars: 1.0
+  expired_after_bars: 2.0
+  block_tick_on_expired: true
+  spread_max_points:
+    EURUSD: 30
+    XAUUSD: 80

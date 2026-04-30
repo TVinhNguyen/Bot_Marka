@@ -59,6 +59,26 @@ class StorageConfig(BaseModel):
     audit_path: str = Field(default="audit", min_length=1)
 
 
+class DataQualityConfig(BaseModel):
+    """Tunable thresholds for the market-data quality gates (issue #6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gap_tolerance: float = Field(default=0.1, ge=0.0, le=1.0)
+    return_outlier_mad_multiple: float = Field(default=8.0, gt=0.0)
+    return_outlier_min_samples: int = Field(default=20, ge=2)
+    stale_after_bars: float = Field(default=1.0, gt=0.0)
+    expired_after_bars: float = Field(default=2.0, gt=0.0)
+    block_tick_on_expired: bool = True
+    spread_max_points: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _stale_before_expired(self) -> DataQualityConfig:
+        if self.stale_after_bars > self.expired_after_bars:
+            raise ValueError("stale_after_bars must be <= expired_after_bars")
+        return self
+
+
 class RiskConfig(BaseModel):
     """Hard risk limits enforced by the Risk Decision gate."""
 
@@ -119,6 +139,7 @@ class AppConfig(BaseModel):
     storage: StorageConfig
     risk: RiskConfig
     execution: ExecutionConfig
+    data_quality: DataQualityConfig = Field(default_factory=lambda: DataQualityConfig())
 
     @model_validator(mode="after")
     def _at_least_one_enabled_symbol(self) -> AppConfig:
