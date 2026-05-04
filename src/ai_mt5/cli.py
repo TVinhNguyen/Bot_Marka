@@ -1,20 +1,29 @@
 """Command-line entrypoint.
 
-Currently exposes a single command: ``ai-mt5 dry-run-tick`` which loads a
-validated config, runs one dry_run tick against fixture bars, and prints a
-machine-readable JSON summary to stdout while writing structured logs and
-audit records to disk.
+Currently exposes:
+
+* ``ai-mt5 dry-run-tick`` -- run one dry_run tick. Either reads bars from a
+  CSV fixture (smoke-test path) or replays from the local BarStore
+  (``--from-store``); when both are supplied, the CSV is ingested into the
+  store first (idempotent) and replay then reads from the store.
+* ``ai-mt5 store-health`` -- print a JSON snapshot of the local BarStore
+  for one symbol-timeframe (bar count, earliest/latest open_time,
+  last_modified, freshness state).
+
+Both commands share the same logging configuration as the runtime tick.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
 
 from .config import ConfigError, load_config
+from .data import BarStore
 from .tick import TickRunner
 from .utils.logging_setup import configure_logging
 
@@ -37,11 +46,25 @@ def cli() -> None:
     "--bars",
     "bars_path",
     type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to a Closed Bar CSV fixture.",
+    default=None,
+    help="Path to a Closed Bar CSV fixture. Required unless --from-store is set.",
 )
-def dry_run_tick(config_path: Path, bars_path: Path) -> None:
-    """Run a single dry_run tick against fixture data."""
+@click.option(
+    "--from-store",
+    "from_store",
+    is_flag=True,
+    default=False,
+    help=(
+        "Replay from the local BarStore instead of the CSV fixture. "
+        "If --bars is also supplied, ingest the CSV into the store first."
+    ),
+)
+def dry_run_tick(config_path: Path, bars_path: Path | None, from_store: bool) -> None:
+    """Run a single dry_run tick against fixture data or store replay."""
+    if not from_store and bars_path is None:
+        click.echo("error: --bars is required unless --from-store is set", err=True)
+        sys.exit(2)
+
     try:
         cfg = load_config(config_path)
     except ConfigError as exc:
@@ -51,11 +74,12 @@ def dry_run_tick(config_path: Path, bars_path: Path) -> None:
     configure_logging(cfg.environment.log_level)
 
     runner = TickRunner(cfg)
-    result = runner.run(bar_fixture_path=bars_path)
+    result = runner.run(bar_fixture_path=bars_path, from_store=from_store)
 
     summary = {
         "trace_id": result.trace_id,
         "status": result.status,
+        "source": "store" if from_store else "fixture",
         "symbol": result.symbol,
         "timeframe": result.timeframe,
         "decision_time": result.decision_time,
@@ -67,6 +91,44 @@ def dry_run_tick(config_path: Path, bars_path: Path) -> None:
     click.echo(json.dumps(summary, sort_keys=True))
     if result.status == "failure":
         sys.exit(1)
+
+
+@cli.command("store-health")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option("--symbol", "symbol", default=None, help="Symbol; defaults to config primary.")
+@click.option(
+    "--timeframe", "timeframe", default=None, help="Timeframe; defaults to config primary."
+)
+def store_health(config_path: Path, symbol: str | None, timeframe: str | None) -> None:
+    """Emit a JSON health snapshot of the local BarStore."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+
+    configure_logging(cfg.environment.log_level)
+
+    primary = cfg.primary_symbol()
+    sym = symbol or primary.symbol
+    tf = timeframe or primary.timeframe
+
+    store = BarStore(cfg.storage.bars_path)
+    health = store.health(
+        symbol=sym,
+        timeframe=tf,
+        now=datetime.now(UTC),
+        stale_after_bars=cfg.data_quality.stale_after_bars,
+        expired_after_bars=cfg.data_quality.expired_after_bars,
+    )
+    click.echo(json.dumps(health.to_dict(), sort_keys=True))
 
 
 def main() -> None:  # pragma: no cover -- thin wrapper

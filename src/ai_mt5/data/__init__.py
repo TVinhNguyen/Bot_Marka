@@ -1,7 +1,7 @@
 """Data loaders, store, anti-leak features, forecasts, quality gates."""
 
 from .bar_loader import BarLoadError, load_closed_bars_csv
-from .bar_store import BarStore, FreshnessState, FreshnessStatus
+from .bar_store import BarStore, FreshnessState, FreshnessStatus, StoreHealth
 from .features import FeatureSet, build_features
 from .forecast_store import JsonlForecastStore
 from .ingest import IngestResult, ingest_bars
@@ -32,6 +32,7 @@ __all__ = [
     "QualityIssue",
     "QualityReport",
     "QualitySeverity",
+    "StoreHealth",
     "UnknownTimeframeError",
     "build_features",
     "ingest_bars",

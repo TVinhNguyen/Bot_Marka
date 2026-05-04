@@ -146,34 +146,63 @@ class TickRunner:
     def run(
         self,
         *,
-        bar_fixture_path: str | Path,
+        bar_fixture_path: str | Path | None = None,
+        from_store: bool = False,
         account: AccountSnapshot | None = None,
         market: MarketSnapshot | None = None,
     ) -> TickResult:
-        """Run one dry_run tick using ``bar_fixture_path`` for Closed Bars.
+        """Run one dry_run tick.
+
+        Bars come from one of two sources:
+
+        * ``bar_fixture_path`` (CSV) -- the original smoke-test path.
+        * ``from_store=True`` -- deterministic replay from the local
+          :class:`BarStore`, which is the source of truth for production.
+          ``bar_fixture_path`` is then optional; if both are provided, the
+          fixture is ingested into the store first (idempotent) so a single
+          command can seed-and-replay.
 
         ``account`` and ``market`` snapshots may be supplied by tests or the
         baseline-tick fixture path. When omitted, this slice short-circuits
         the Risk gate: the forecast is still recorded and audited but the
         tick ends in HOLD.
         """
+        if not from_store and bar_fixture_path is None:
+            raise ValueError("run() requires either bar_fixture_path or from_store=True")
         symbol = self._cfg.primary_symbol()
+        source: str
         with with_trace_id() as trace_id:
             try:
-                self._audit_tick_start(trace_id, symbol, bar_fixture_path)
+                if from_store and bar_fixture_path is not None:
+                    seed = load_closed_bars_csv(
+                        bar_fixture_path,
+                        symbol=symbol.symbol,
+                        timeframe=symbol.timeframe,
+                    )
+                    self.ingest(seed)
+                if from_store:
+                    source = f"store:{self._bar_store.path_for(symbol.symbol, symbol.timeframe)}"
+                else:
+                    assert bar_fixture_path is not None
+                    source = str(bar_fixture_path)
+                self._audit_tick_start(trace_id, symbol, source)
                 self._log.info(
                     "tick.start",
                     symbol=symbol.symbol,
                     timeframe=symbol.timeframe,
-                    fixture=str(bar_fixture_path),
+                    fixture=source,
                     mode=self._cfg.environment.mode,
                 )
 
-                bars = load_closed_bars_csv(
-                    bar_fixture_path,
-                    symbol=symbol.symbol,
-                    timeframe=symbol.timeframe,
-                )
+                if from_store:
+                    bars = self._bar_store.load(symbol=symbol.symbol, timeframe=symbol.timeframe)
+                else:
+                    assert bar_fixture_path is not None
+                    bars = load_closed_bars_csv(
+                        bar_fixture_path,
+                        symbol=symbol.symbol,
+                        timeframe=symbol.timeframe,
+                    )
                 if len(bars) < 2:
                     raise ValueError("tick requires at least 2 Closed Bars (history + decision)")
 

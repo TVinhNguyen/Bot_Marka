@@ -106,3 +106,44 @@ def test_malformed_store_file_raises(tmp_path: Path) -> None:
     path.write_text("not json\n", encoding="utf-8")
     with pytest.raises(BarLoadError):
         store.load(symbol="EURUSD", timeframe="M15")
+
+
+def test_health_for_empty_store(tmp_path: Path) -> None:
+    store = BarStore(tmp_path)
+    now = datetime(2024, 1, 1, 5, 0, tzinfo=UTC)
+    health = store.health(symbol="EURUSD", timeframe="M15", now=now)
+    assert health.bar_count == 0
+    assert health.earliest_open_time is None
+    assert health.latest_open_time is None
+    assert health.last_modified is None
+    assert health.freshness.state is FreshnessState.EMPTY
+    assert health.to_dict()["ok"] is False
+
+
+def test_health_reports_count_and_window(tmp_path: Path) -> None:
+    store = BarStore(tmp_path)
+    bars = [_bar(i) for i in range(4)]
+    store.append_many(bars)
+    now = bars[-1].open_time + timedelta(minutes=5)
+    health = store.health(symbol="EURUSD", timeframe="M15", now=now)
+    assert health.bar_count == 4
+    assert health.earliest_open_time == bars[0].open_time
+    assert health.latest_open_time == bars[-1].open_time
+    assert health.last_modified is not None
+    assert health.freshness.state is FreshnessState.FRESH
+    payload = health.to_dict()
+    assert payload["symbol"] == "EURUSD"
+    assert payload["timeframe"] == "M15"
+    assert payload["bar_count"] == 4
+    assert payload["freshness"]["state"] == "fresh"
+    assert payload["ok"] is True
+
+
+def test_health_marks_expired_when_lag_exceeds_threshold(tmp_path: Path) -> None:
+    store = BarStore(tmp_path)
+    bars = [_bar(i) for i in range(2)]
+    store.append_many(bars)
+    far_future = bars[-1].open_time + timedelta(minutes=15 * 5)
+    health = store.health(symbol="EURUSD", timeframe="M15", now=far_future)
+    assert health.freshness.state is FreshnessState.EXPIRED
+    assert health.to_dict()["ok"] is False

@@ -104,3 +104,24 @@ def test_full_pipeline_with_broker_snapshots_can_approve(
             assert "effective_risk_pct=" in result.risk_decision.reason
         else:
             assert "risk_below_min_cap" in result.risk_decision.rejected_by
+
+
+def test_dry_run_tick_can_replay_from_store(app_config, fixture_bars_path: Path) -> None:
+    """Issue #6: dry-run-tick must replay from the local BarStore deterministically."""
+    runner = TickRunner(app_config)
+    seeded = runner.run(bar_fixture_path=fixture_bars_path, from_store=True)
+    assert seeded.status == "success"
+
+    replay = runner.run(from_store=True)
+    assert replay.status == "success"
+    assert replay.forecast is not None
+    # Same fixture, same Closed Bars -> deterministic forecast direction.
+    assert replay.forecast.direction == seeded.forecast.direction
+
+
+def test_dry_run_tick_requires_source(app_config) -> None:
+    runner = TickRunner(app_config)
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        runner.run()

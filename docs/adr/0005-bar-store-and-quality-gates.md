@@ -70,6 +70,23 @@ addition to the existing `tick.start` / `forecast` / `meta_signal` /
 answer "why did this tick refuse to trade?" without re-reading market
 data.
 
+### Health output and replay-from-store
+
+The store exposes a structured `BarStore.health(symbol, timeframe, now)`
+that returns `StoreHealth` (bar count, earliest/latest `open_time`,
+filesystem `last_modified`, freshness state). The CLI subcommand
+`ai-mt5 store-health` prints the same payload as JSON so operators have
+a one-line probe without writing Python. The same payload will back any
+future HTTP/Prometheus health endpoint without re-deriving the math.
+
+`ai-mt5 dry-run-tick` also gains a `--from-store` flag that loads bars
+from the local `BarStore` instead of the CSV fixture, making the store
+the deterministic replay source. When both `--bars` and `--from-store`
+are supplied, the CSV is ingested into the store first (idempotent) and
+the tick replay then reads from the store. This satisfies issue #6's
+"replay-from-store path" acceptance criterion while preserving the
+fixture-only smoke path for tests that don't need persistence.
+
 ## Consequences
 
 * Backtests (#10) and the model adapters (#7) will consume `BarStore`

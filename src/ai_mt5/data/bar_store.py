@@ -103,6 +103,44 @@ class FreshnessStatus:
         return self.state is FreshnessState.FRESH
 
 
+@dataclass(frozen=True)
+class StoreHealth:
+    """Operator-facing snapshot of one symbol-timeframe's stored data.
+
+    Structured payload behind ``ai-mt5 store-health`` and the health
+    surface tick runners will expose. Fields are timezone-aware and
+    JSON-serialisable.
+    """
+
+    symbol: str
+    timeframe: str
+    bar_count: int
+    earliest_open_time: datetime | None
+    latest_open_time: datetime | None
+    last_modified: datetime | None
+    freshness: FreshnessStatus
+
+    def to_dict(self) -> dict[str, object]:
+        def _iso(ts: datetime | None) -> str | None:
+            return _isoformat_utc(ts) if ts is not None else None
+
+        lag = self.freshness.lag_bars
+        return {
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "bar_count": self.bar_count,
+            "earliest_open_time": _iso(self.earliest_open_time),
+            "latest_open_time": _iso(self.latest_open_time),
+            "last_modified": _iso(self.last_modified),
+            "freshness": {
+                "state": str(self.freshness.state),
+                "lag_bars": None if lag == float("inf") else lag,
+                "checked_at": _iso(self.freshness.checked_at),
+            },
+            "ok": self.freshness.ok,
+        }
+
+
 class BarStore:
     """JSONL-backed append-only bar store for one symbol-timeframe.
 
@@ -231,4 +269,46 @@ class BarStore:
             latest_open_time=latest.open_time,
             checked_at=now,
             lag_bars=max(lag, 0.0),
+        )
+
+    # -- health --------------------------------------------------------------
+
+    def health(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        now: datetime,
+        stale_after_bars: float = 1.0,
+        expired_after_bars: float = 2.0,
+    ) -> StoreHealth:
+        """Return an operator-facing snapshot of the store for one pair.
+
+        This is the structured health output referenced by issue #6: it
+        exposes bar count, earliest/latest open_time, last_modified
+        timestamp, and the freshness state in a single JSON-serialisable
+        record. ``ai-mt5 store-health`` and any future health endpoint
+        share this payload.
+        """
+        bars = self.load(symbol=symbol, timeframe=timeframe)
+        path = self.path_for(symbol, timeframe)
+        last_modified: datetime | None = None
+        if path.exists():
+            mtime = path.stat().st_mtime
+            last_modified = datetime.fromtimestamp(mtime, tz=UTC)
+        freshness = self.freshness(
+            symbol=symbol,
+            timeframe=timeframe,
+            now=now,
+            stale_after_bars=stale_after_bars,
+            expired_after_bars=expired_after_bars,
+        )
+        return StoreHealth(
+            symbol=symbol,
+            timeframe=timeframe,
+            bar_count=len(bars),
+            earliest_open_time=bars[0].open_time if bars else None,
+            latest_open_time=bars[-1].open_time if bars else None,
+            last_modified=last_modified,
+            freshness=freshness,
         )
