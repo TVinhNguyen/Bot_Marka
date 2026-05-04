@@ -24,6 +24,7 @@ class BaselineAdapter:
     """Deterministic Baseline model adapter."""
 
     name = "baseline_sma_momentum"
+    version = "1.0.0"
 
     def __init__(self, *, horizon: int = 8, score_scale: float = 50.0) -> None:
         if horizon <= 0:

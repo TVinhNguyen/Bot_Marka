@@ -22,8 +22,14 @@ from pathlib import Path
 
 import click
 
+from .backtest import (
+    BacktestConfig,
+    BacktestRunSpec,
+    CostModel,
+    run_backtest,
+)
 from .config import ConfigError, load_config
-from .data import BarStore
+from .data import BarStore, load_closed_bars_csv
 from .tick import TickRunner
 from .utils.logging_setup import configure_logging
 
@@ -129,6 +135,125 @@ def store_health(config_path: Path, symbol: str | None, timeframe: str | None) -
         expired_after_bars=cfg.data_quality.expired_after_bars,
     )
     click.echo(json.dumps(health.to_dict(), sort_keys=True))
+
+
+@cli.command("backtest")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--bars",
+    "bars_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to a Closed Bar CSV fixture used as the bar series.",
+)
+@click.option("--train", type=int, default=200, show_default=True, help="Bars per train range.")
+@click.option(
+    "--validation",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Bars per validation range.",
+)
+@click.option("--oos", type=int, default=100, show_default=True, help="Bars per OOS range.")
+@click.option(
+    "--step",
+    type=int,
+    default=None,
+    help="Bars between window starts (defaults to --oos: non-overlapping OOS).",
+)
+@click.option(
+    "--initial-equity",
+    type=float,
+    default=10_000.0,
+    show_default=True,
+    help="Starting equity in deposit currency.",
+)
+@click.option("--seed", type=int, default=0, show_default=True, help="Reproducibility seed.")
+@click.option("--spread-points", type=float, default=0.5, show_default=True)
+@click.option("--commission-per-lot", type=float, default=0.0, show_default=True)
+@click.option("--slippage-buffer-points", type=float, default=0.5, show_default=True)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=Path("reports/backtest.json"),
+    show_default=True,
+    help="Where to write the JSON report.",
+)
+def backtest(
+    config_path: Path,
+    bars_path: Path,
+    train: int,
+    validation: int,
+    oos: int,
+    step: int | None,
+    initial_equity: float,
+    seed: int,
+    spread_points: float,
+    commission_per_lot: float,
+    slippage_buffer_points: float,
+    out_path: Path,
+) -> None:
+    """Run a walk-forward backtest and write a JSON report."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+
+    configure_logging(cfg.environment.log_level)
+    primary = cfg.primary_symbol()
+    bars = load_closed_bars_csv(bars_path, symbol=primary.symbol, timeframe=primary.timeframe)
+    if not bars:
+        click.echo("error: bar fixture is empty", err=True)
+        sys.exit(2)
+
+    cost_model = CostModel(
+        spread_points=spread_points,
+        commission_per_lot=commission_per_lot,
+        slippage_buffer_points=slippage_buffer_points,
+    )
+    bt_config = BacktestConfig(
+        symbol=primary.symbol,
+        timeframe=primary.timeframe,
+        initial_equity=initial_equity,
+        risk=cfg.risk,
+        cost_model=cost_model,
+        magic=cfg.execution.magic,
+        order_comment=cfg.execution.order_comment,
+    )
+    spec = BacktestRunSpec(
+        config=bt_config,
+        train=train,
+        validation=validation,
+        oos=oos,
+        step=step,
+        seed=seed,
+    )
+    report = run_backtest(
+        bars,
+        spec=spec,
+        config_for_manifest=cfg.model_dump(),
+    )
+    report.write_json(out_path)
+    click.echo(
+        json.dumps(
+            {
+                "out": str(out_path),
+                "n_windows": len(report.windows),
+                "manifest": report.manifest.to_dict(),
+                "comparison": report.aggregate.get("comparison", {}),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def main() -> None:  # pragma: no cover -- thin wrapper
