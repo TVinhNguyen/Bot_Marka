@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .audit import AuditRecord, AuditTrail, JsonlAuditTrail
 from .baseline import BaselineAdapter
@@ -42,10 +43,13 @@ from .models.protocol import AdapterError, ModelAdapter
 from .observability.alerts import AlertManager, default_rules
 from .observability.metrics import (
     DATA_FRESHNESS_LAG_BARS,
+    DRAWDOWN_PCT,
+    EQUITY,
     ERRORS,
     FORECASTS_EMITTED,
     LATENCY_MS,
     META_SIGNALS_EMITTED,
+    OPEN_POSITIONS,
     RISK_DECISIONS,
     SPREAD_POINTS,
     MetricsRegistry,
@@ -349,6 +353,7 @@ class TickRunner:
                     freshness=freshness,
                     failures=failures,
                     n_adapter_total=len(self._adapters) + 1,
+                    account=account,
                     now=decision_bar.open_time,
                 )
                 self._metrics.observe(
@@ -442,20 +447,24 @@ class TickRunner:
         freshness: FreshnessStatus,
         failures: int,
         n_adapter_total: int,
+        account: AccountSnapshot | None,
         now: datetime,
     ) -> None:
         adapter_failure_rate = failures / n_adapter_total if n_adapter_total > 0 else 0.0
-        self._alerts.evaluate(
-            {
-                "symbol": freshness.symbol,
-                "timeframe": freshness.timeframe,
-                "freshness": str(freshness.state),
-                "lag_bars": (None if freshness.lag_bars == float("inf") else freshness.lag_bars),
-                "kill_switch_engaged": self._kill.is_engaged(),
-                "adapter_failure_rate": adapter_failure_rate,
-            },
-            now=now,
-        )
+        payload: dict[str, Any] = {
+            "symbol": freshness.symbol,
+            "timeframe": freshness.timeframe,
+            "freshness": str(freshness.state),
+            "lag_bars": (None if freshness.lag_bars == float("inf") else freshness.lag_bars),
+            "kill_switch_engaged": self._kill.is_engaged(),
+            "adapter_failure_rate": adapter_failure_rate,
+        }
+        if account is not None:
+            payload["drawdown_pct"] = account.drawdown_pct
+            self._metrics.set_gauge(EQUITY, account.equity)
+            self._metrics.set_gauge(DRAWDOWN_PCT, account.drawdown_pct)
+            self._metrics.set_gauge(OPEN_POSITIONS, float(account.open_positions))
+        self._alerts.evaluate(payload, now=now)
 
     def _evaluate_event_risk(self, *, symbol: str, as_of: datetime) -> EventRiskOutput | None:
         if self._event_risk is None:

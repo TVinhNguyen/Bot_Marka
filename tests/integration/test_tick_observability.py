@@ -54,6 +54,27 @@ def test_tick_failure_increments_errors(app_config, tmp_path: Path) -> None:
     assert err.value == 1
 
 
+def test_drawdown_alert_fires_when_account_in_breach(
+    app_config, fixture_bars_path: Path, account_snapshot, market_snapshot
+) -> None:
+    """Regression: drawdown_breach must reach the AlertManager from the tick.
+
+    Devin Review caught that ``_fire_observability_alerts`` previously
+    omitted ``drawdown_pct``, which silently disabled the safety alert.
+    """
+    from dataclasses import replace
+
+    breached = replace(account_snapshot, drawdown_pct=0.10)  # 10% > 5% default
+    alerts = AlertManager(default_rules(drawdown_threshold=0.05))
+    runner = TickRunner(app_config, alert_manager=alerts)
+    runner.run(
+        bar_fixture_path=fixture_bars_path,
+        account=breached,
+        market=market_snapshot,
+    )
+    assert "drawdown_breach" in {a.rule_id for a in alerts.fired}
+
+
 def test_alerts_fire_when_kill_switch_engaged(app_config, fixture_bars_path: Path) -> None:
     kill = InMemoryKillSwitch(engaged=True)
     alerts = AlertManager(default_rules())
