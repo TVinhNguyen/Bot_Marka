@@ -1,0 +1,5 @@
+# Size Position By Meta-Signal Confidence and Agreement
+
+The Risk Decision gate scales effective risk per trade by the Meta-Signal's `confidence` and `agreement` so that a weak signal cannot receive the same size as a strong one. The rule is `effective_risk_pct = clamp(base_risk_per_trade * confidence * agreement, min_risk_per_trade, max_risk_per_trade)`. A perfect signal (confidence=1, agreement=1) sizes at `base_risk_per_trade`; weaker signals shrink toward the configured floor, and the existing `min_risk_per_trade` and `max_risk_per_trade` caps still bound the result.
+
+The product `confidence * agreement` is the simplest defensible scalar that punishes both *low conviction* (uncertain forecast) and *low consensus* (component models disagreeing). Both inputs already live in `[0, 1]` by the `MetaSignal` contract, so no extra normalisation is needed. `RiskDecision.reason` records `confidence`, `agreement`, and `effective_risk_pct` so the audit trail makes the sizing math reproducible. Callers that have no Meta-Signal yet (legacy tests, smoke tools) can omit `confidence_factor`; the default `1.0` preserves the previous behaviour.

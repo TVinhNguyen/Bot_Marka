@@ -22,8 +22,16 @@ from pathlib import Path
 from .audit import AuditRecord, AuditTrail, JsonlAuditTrail
 from .baseline import BaselineAdapter
 from .config.models import AppConfig, SymbolTimeframe
-from .data import build_features, load_closed_bars_csv
+from .data import (
+    BarStore,
+    FreshnessState,
+    FreshnessStatus,
+    build_features,
+    ingest_bars,
+    load_closed_bars_csv,
+)
 from .data.forecast_store import JsonlForecastStore
+from .data.quality import QualityConfig, QualityReport
 from .domain.bar import Bar
 from .domain.forecast import Forecast, MetaSignal
 from .domain.market import AccountSnapshot, MarketSnapshot
@@ -33,6 +41,18 @@ from .risk.kill_switch import FileKillSwitch, KillSwitch
 from .utils.logging_setup import get_logger
 from .utils.time_utils import to_iso, utcnow
 from .utils.tracing import with_trace_id
+
+
+class DataQualityError(RuntimeError):
+    """Raised when a blocking market-data quality issue prevents a tick.
+
+    Core bar data failure blocks trading (per issue #6); optional checks
+    degrade to warnings only.
+    """
+
+    def __init__(self, reasons: list[str]) -> None:
+        super().__init__("; ".join(reasons) or "unknown data quality failure")
+        self.reasons = reasons
 
 
 @dataclass(frozen=True)
@@ -47,6 +67,8 @@ class TickResult:
     risk_decision: RiskDecision | None
     status: str  # "success" | "failure" | "no_data"
     error: str | None = None
+    data_freshness: FreshnessStatus | None = None
+    data_quality: QualityReport | None = None
 
 
 class TickRunner:
@@ -60,6 +82,7 @@ class TickRunner:
         forecast_store: JsonlForecastStore | None = None,
         kill_switch: KillSwitch | None = None,
         baseline: BaselineAdapter | None = None,
+        bar_store: BarStore | None = None,
     ) -> None:
         self._cfg = config
         self._audit = audit or JsonlAuditTrail(Path(config.storage.audit_path) / "audit.jsonl")
@@ -68,6 +91,7 @@ class TickRunner:
         )
         self._kill = kill_switch or FileKillSwitch(config.risk.kill_switch_file)
         self._baseline = baseline or BaselineAdapter()
+        self._bar_store = bar_store or BarStore(config.storage.bars_path)
         self._risk = RiskManager(
             config.risk,
             self._kill,
@@ -76,41 +100,161 @@ class TickRunner:
         )
         self._log = get_logger("ai_mt5.tick")
 
+    # -- data-health helpers -------------------------------------------------
+
+    def _quality_config(self) -> QualityConfig:
+        dq = self._cfg.data_quality
+        return QualityConfig(
+            return_outlier_mad_multiple=dq.return_outlier_mad_multiple,
+            return_outlier_min_samples=dq.return_outlier_min_samples,
+            gap_tolerance=dq.gap_tolerance,
+            spread_max_points=dict(dq.spread_max_points),
+        )
+
+    def ingest(self, bars: list[Bar]) -> QualityReport:
+        """Run quality gates and persist bars through :class:`BarStore`.
+
+        Intended for smoke tests and fixture replay; production ingest will
+        use an MT5-backed source.
+        """
+        if not bars:
+            raise ValueError("ingest requires at least one Bar")
+        result = ingest_bars(
+            bars,
+            store=self._bar_store,
+            symbol=bars[0].symbol,
+            timeframe=bars[0].timeframe,
+            config=self._quality_config(),
+        )
+        return result.report
+
+    def freshness(self, *, now: datetime | None = None) -> FreshnessStatus:
+        """Return freshness of the primary symbol-timeframe."""
+        ref = now or utcnow()
+        sym = self._cfg.primary_symbol()
+        dq = self._cfg.data_quality
+        return self._bar_store.freshness(
+            symbol=sym.symbol,
+            timeframe=sym.timeframe,
+            now=ref,
+            stale_after_bars=dq.stale_after_bars,
+            expired_after_bars=dq.expired_after_bars,
+        )
+
     # -- public --------------------------------------------------------------
 
     def run(
         self,
         *,
-        bar_fixture_path: str | Path,
+        bar_fixture_path: str | Path | None = None,
+        from_store: bool = False,
         account: AccountSnapshot | None = None,
         market: MarketSnapshot | None = None,
+        now: datetime | None = None,
     ) -> TickResult:
-        """Run one dry_run tick using ``bar_fixture_path`` for Closed Bars.
+        """Run one dry_run tick.
+
+        Bars come from one of two sources:
+
+        * ``bar_fixture_path`` (CSV) -- the original smoke-test path.
+        * ``from_store=True`` -- deterministic replay from the local
+          :class:`BarStore`, which is the source of truth for production.
+          ``bar_fixture_path`` is then optional; if both are provided, the
+          fixture is ingested into the store first (idempotent) so a single
+          command can seed-and-replay.
 
         ``account`` and ``market`` snapshots may be supplied by tests or the
         baseline-tick fixture path. When omitted, this slice short-circuits
         the Risk gate: the forecast is still recorded and audited but the
         tick ends in HOLD.
         """
+        if not from_store and bar_fixture_path is None:
+            raise ValueError("run() requires either bar_fixture_path or from_store=True")
         symbol = self._cfg.primary_symbol()
+        source: str
         with with_trace_id() as trace_id:
             try:
-                self._audit_tick_start(trace_id, symbol, bar_fixture_path)
+                if from_store and bar_fixture_path is not None:
+                    seed = load_closed_bars_csv(
+                        bar_fixture_path,
+                        symbol=symbol.symbol,
+                        timeframe=symbol.timeframe,
+                    )
+                    seed_report = self.ingest(seed)
+                    if not seed_report.ok:
+                        # Fail loud rather than silently replay whatever the
+                        # store already had: the operator asked us to use this
+                        # fixture and its quality gates blocked the write.
+                        raise DataQualityError(
+                            [
+                                f"seed ingest blocked: {issue.message}"
+                                for issue in seed_report.blocking_issues
+                            ]
+                        )
+                if from_store:
+                    source = f"store:{self._bar_store.path_for(symbol.symbol, symbol.timeframe)}"
+                else:
+                    assert bar_fixture_path is not None
+                    source = str(bar_fixture_path)
+                self._audit_tick_start(trace_id, symbol, source)
                 self._log.info(
                     "tick.start",
                     symbol=symbol.symbol,
                     timeframe=symbol.timeframe,
-                    fixture=str(bar_fixture_path),
+                    fixture=source,
                     mode=self._cfg.environment.mode,
                 )
 
-                bars = load_closed_bars_csv(
-                    bar_fixture_path,
-                    symbol=symbol.symbol,
-                    timeframe=symbol.timeframe,
-                )
+                if from_store:
+                    bars = self._bar_store.load(symbol=symbol.symbol, timeframe=symbol.timeframe)
+                else:
+                    assert bar_fixture_path is not None
+                    bars = load_closed_bars_csv(
+                        bar_fixture_path,
+                        symbol=symbol.symbol,
+                        timeframe=symbol.timeframe,
+                    )
                 if len(bars) < 2:
                     raise ValueError("tick requires at least 2 Closed Bars (history + decision)")
+
+                data_quality = self._run_quality_gates(bars, symbol)
+                self._audit_data_quality(trace_id, data_quality)
+                if not data_quality.ok:
+                    raise DataQualityError(
+                        [issue.message for issue in data_quality.blocking_issues]
+                    )
+
+                # When replaying from the store, ``bars[-1].open_time`` IS the
+                # store's latest bar, so using it as ``now`` would always yield
+                # ``lag=0`` and ``FreshnessState.FRESH`` -- defeating the
+                # ``block_tick_on_expired`` guard. Default to wall-clock time
+                # for from_store, while letting callers pin ``now`` for
+                # deterministic tests.
+                freshness_now = (now or utcnow()) if from_store else bars[-1].open_time
+                freshness = self._bar_store.freshness(
+                    symbol=symbol.symbol,
+                    timeframe=symbol.timeframe,
+                    now=freshness_now,
+                    stale_after_bars=self._cfg.data_quality.stale_after_bars,
+                    expired_after_bars=self._cfg.data_quality.expired_after_bars,
+                )
+                self._audit_freshness(trace_id, freshness)
+                # Only block on store freshness when the tick is actually
+                # replaying from the store. In the CSV-fixture path the bars
+                # are authoritative and the local store may legitimately be
+                # empty or out of date; we still emit the freshness audit
+                # record above for visibility.
+                if (
+                    from_store
+                    and self._cfg.data_quality.block_tick_on_expired
+                    and freshness.state is FreshnessState.EXPIRED
+                ):
+                    raise DataQualityError(
+                        [
+                            f"data store freshness={freshness.state.value} "
+                            f"(lag_bars={freshness.lag_bars:.2f})"
+                        ]
+                    )
 
                 history = bars[:-1]
                 decision_bar = bars[-1]
@@ -151,6 +295,8 @@ class TickRunner:
                     forecast=forecast,
                     risk_decision=decision,
                     status="success",
+                    data_freshness=freshness,
+                    data_quality=data_quality,
                 )
 
             except Exception as exc:
@@ -172,6 +318,16 @@ class TickRunner:
                 )
 
     # -- helpers -------------------------------------------------------------
+
+    def _run_quality_gates(self, bars: list[Bar], symbol: SymbolTimeframe) -> QualityReport:
+        from .data.quality import run_quality_gates as _run
+
+        return _run(
+            bars,
+            symbol=symbol.symbol,
+            timeframe=symbol.timeframe,
+            config=self._quality_config(),
+        )
 
     def _wrap_meta_signal(self, forecast: Forecast) -> MetaSignal:
         return MetaSignal(
@@ -293,6 +449,49 @@ class TickRunner:
                     "risk_approved": decision.approved,
                     "risk_rejected_by": decision.rejected_by,
                     "completed_at": to_iso(utcnow()),
+                },
+            )
+        )
+
+    def _audit_data_quality(self, trace_id: str, report: QualityReport) -> None:
+        self._audit.append(
+            AuditRecord(
+                kind="data_quality",
+                trace_id=trace_id,
+                payload={
+                    "symbol": report.symbol,
+                    "timeframe": report.timeframe,
+                    "n_bars": report.n_bars,
+                    "ok": report.ok,
+                    "blocking": [
+                        {"code": i.code, "message": i.message} for i in report.blocking_issues
+                    ],
+                    "warnings": [{"code": i.code, "message": i.message} for i in report.warnings],
+                },
+            )
+        )
+
+    def _audit_freshness(self, trace_id: str, freshness: FreshnessStatus) -> None:
+        self._audit.append(
+            AuditRecord(
+                kind="data_freshness",
+                trace_id=trace_id,
+                payload={
+                    "symbol": freshness.symbol,
+                    "timeframe": freshness.timeframe,
+                    "state": freshness.state.value,
+                    "latest_open_time": (
+                        to_iso(freshness.latest_open_time)
+                        if freshness.latest_open_time is not None
+                        else None
+                    ),
+                    "checked_at": to_iso(freshness.checked_at),
+                    # ``float('inf')`` would serialise as the non-standard
+                    # ``Infinity`` token; emit ``null`` for an empty store
+                    # so the audit JSONL stays RFC 8259-compliant.
+                    "lag_bars": (
+                        None if freshness.lag_bars == float("inf") else freshness.lag_bars
+                    ),
                 },
             )
         )

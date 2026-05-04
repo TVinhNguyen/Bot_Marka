@@ -3,6 +3,7 @@
 from .loader import ConfigError, load_config
 from .models import (
     AppConfig,
+    DataQualityConfig,
     EnvironmentConfig,
     ExecutionConfig,
     RiskConfig,
@@ -13,6 +14,7 @@ from .models import (
 __all__ = [
     "AppConfig",
     "ConfigError",
+    "DataQualityConfig",
     "EnvironmentConfig",
     "ExecutionConfig",
     "RiskConfig",

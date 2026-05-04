@@ -24,6 +24,8 @@ class SizingResult:
     volume: float
     risk_amount: float
     rejected_by: list[str]
+    effective_risk_pct: float = 0.0
+    confidence_factor: float = 1.0
 
     @property
     def approved(self) -> bool:
@@ -58,17 +60,28 @@ def size_position(
     volume_min: float,
     volume_max: float,
     volume_step: float,
+    confidence_factor: float = 1.0,
 ) -> SizingResult:
     """Compute a broker-valid trade volume.
 
+    The *effective* risk per trade is
+    ``clamp(base_risk_pct * confidence_factor, min_risk_pct, max_risk_pct)``.
+    A perfect Meta-Signal (confidence=1, agreement=1) sizes at
+    ``base_risk_pct``; a weaker signal scales down toward ``min_risk_pct``
+    so that low-conviction trades never receive the same size as
+    high-conviction ones (PRD requirement, see ADR 0007).
+
     Args:
         equity: Account equity in deposit currency.
-        base_risk_pct: Target risk per trade as a fraction of equity.
+        base_risk_pct: Target risk per trade for a perfect signal.
         min_risk_pct: Hard floor for risk per trade.
         max_risk_pct: Hard ceiling for risk per trade.
         sl_distance_price: Distance from entry to SL, in price units.
         contract_size: Broker contract size (e.g. 100_000 for FX majors).
         volume_min/max/step: Broker volume constraints.
+        confidence_factor: Meta-Signal-derived scalar in ``[0, 1]``
+            (typically ``confidence * agreement``). Defaults to ``1.0``
+            for callers that have no Meta-Signal yet.
     """
     rejected: list[str] = []
     if equity <= 0:
@@ -81,8 +94,21 @@ def size_position(
             risk_amount=0.0,
             rejected_by=["invalid_risk_pct_band"],
         )
+    if not (0.0 <= confidence_factor <= 1.0):
+        return SizingResult(
+            volume=0.0,
+            risk_amount=0.0,
+            rejected_by=["invalid_confidence_factor"],
+            confidence_factor=confidence_factor,
+        )
 
-    target_risk = equity * base_risk_pct
+    effective_pct = base_risk_pct * confidence_factor
+    if effective_pct < min_risk_pct:
+        effective_pct = min_risk_pct
+    if effective_pct > max_risk_pct:
+        effective_pct = max_risk_pct
+
+    target_risk = equity * effective_pct
     raw_volume = target_risk / (sl_distance_price * contract_size)
     stepped = _round_to_step(raw_volume, volume_step)
 
@@ -105,4 +131,10 @@ def size_position(
         stepped = 0.0
         actual_risk = 0.0
 
-    return SizingResult(volume=stepped, risk_amount=actual_risk, rejected_by=rejected)
+    return SizingResult(
+        volume=stepped,
+        risk_amount=actual_risk,
+        rejected_by=rejected,
+        effective_risk_pct=effective_pct,
+        confidence_factor=confidence_factor,
+    )

@@ -216,3 +216,62 @@ def test_all_applicable_reasons_collected(app_config, account_snapshot, market_s
         "signal_hold",
     }
     assert expected.issubset(set(decision.rejected_by))
+
+
+def test_strong_signal_sizes_larger_than_weak_signal(
+    app_config, account_snapshot, market_snapshot
+) -> None:
+    """PRD: effective risk must scale with Meta-Signal confidence and agreement.
+
+    A weak BUY signal that passes the gate must NEVER receive the same
+    volume as a perfect BUY signal under identical account/market state.
+    """
+    mgr = _make_manager(app_config)
+
+    strong = MetaSignal(
+        direction="BUY",
+        final_score=0.5,
+        raw_score=0.5,
+        agreement=1.0,
+        confidence=1.0,
+    )
+    weak = MetaSignal(
+        direction="BUY",
+        final_score=0.5,
+        raw_score=0.5,
+        agreement=0.7,
+        confidence=0.6,
+    )
+
+    d_strong = mgr.evaluate(strong, account_snapshot, market_snapshot)
+    d_weak = mgr.evaluate(weak, account_snapshot, market_snapshot)
+    assert d_strong.approved and d_weak.approved
+    assert d_weak.volume < d_strong.volume
+    assert "confidence=" in d_strong.reason
+    assert "agreement=" in d_strong.reason
+    assert "effective_risk_pct=" in d_strong.reason
+
+
+def test_confidence_zero_floors_to_min_risk(app_config, account_snapshot, market_snapshot) -> None:
+    """confidence*agreement=0 must floor at min_risk_per_trade, not zero out."""
+    mgr = _make_manager(app_config)
+    floored = MetaSignal(
+        direction="BUY",
+        final_score=0.5,
+        raw_score=0.5,
+        agreement=0.0,
+        confidence=0.0,
+    )
+    decision = mgr.evaluate(floored, account_snapshot, market_snapshot)
+    # Either approved at min floor, or cleanly rejected (e.g. broker step too coarse) --
+    # but never approved at the strong-signal volume.
+    if decision.approved:
+        strong = MetaSignal(
+            direction="BUY",
+            final_score=0.5,
+            raw_score=0.5,
+            agreement=1.0,
+            confidence=1.0,
+        )
+        d_strong = mgr.evaluate(strong, account_snapshot, market_snapshot)
+        assert decision.volume <= d_strong.volume

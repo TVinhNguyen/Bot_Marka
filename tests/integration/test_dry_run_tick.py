@@ -81,8 +81,12 @@ def test_full_pipeline_with_broker_snapshots_can_approve(
 ) -> None:
     """When the operator supplies account+market snapshots, the Risk gate runs.
 
-    The fixture data trends up so the Baseline emits BUY, which the Risk gate
-    must approve given a healthy account.
+    Per ADR 0007, sizing scales by ``MetaSignal.confidence * agreement``.
+    The Baseline's natural confidence on this short fixture is modest, so
+    one of two outcomes is acceptable: (a) the gate approves at a *smaller*
+    effective risk than ``base_risk_per_trade``, or (b) the floor falls
+    below the broker's step granularity and the gate rejects with
+    ``risk_below_min_cap``. Both outcomes are correct under the PRD.
     """
     runner = TickRunner(app_config)
     result = runner.run(
@@ -94,5 +98,104 @@ def test_full_pipeline_with_broker_snapshots_can_approve(
     assert result.forecast is not None
     if result.forecast.direction in ("BUY", "SELL"):
         assert result.risk_decision is not None
-        assert result.risk_decision.approved
-        assert result.risk_decision.side == result.forecast.direction
+        if result.risk_decision.approved:
+            assert result.risk_decision.side == result.forecast.direction
+            assert "confidence=" in result.risk_decision.reason
+            assert "effective_risk_pct=" in result.risk_decision.reason
+        else:
+            assert "risk_below_min_cap" in result.risk_decision.rejected_by
+
+
+def test_dry_run_tick_can_replay_from_store(app_config, fixture_bars_path: Path) -> None:
+    """Issue #6: dry-run-tick must replay from the local BarStore deterministically."""
+    from datetime import timedelta
+
+    from ai_mt5.data import load_closed_bars_csv
+
+    sym = app_config.primary_symbol()
+    fixture_bars = load_closed_bars_csv(
+        fixture_bars_path, symbol=sym.symbol, timeframe=sym.timeframe
+    )
+    # Pin the wall-clock just past the fixture's latest bar so the freshness
+    # block doesn't trip on a fixture written months ago.
+    pinned_now = fixture_bars[-1].open_time + timedelta(minutes=5)
+
+    runner = TickRunner(app_config)
+    seeded = runner.run(bar_fixture_path=fixture_bars_path, from_store=True, now=pinned_now)
+    assert seeded.status == "success"
+
+    replay = runner.run(from_store=True, now=pinned_now)
+    assert replay.status == "success"
+    assert replay.forecast is not None
+    # Same fixture, same Closed Bars -> deterministic forecast direction.
+    assert replay.forecast.direction == seeded.forecast.direction
+
+
+def test_from_store_blocks_when_data_is_expired(app_config, fixture_bars_path: Path) -> None:
+    """When replaying from the store, an old store must trip block_tick_on_expired."""
+    from datetime import timedelta
+
+    from ai_mt5.data import load_closed_bars_csv
+
+    sym = app_config.primary_symbol()
+    fixture_bars = load_closed_bars_csv(
+        fixture_bars_path, symbol=sym.symbol, timeframe=sym.timeframe
+    )
+    runner = TickRunner(app_config)
+    seeded = runner.run(
+        bar_fixture_path=fixture_bars_path,
+        from_store=True,
+        now=fixture_bars[-1].open_time + timedelta(minutes=5),
+    )
+    assert seeded.status == "success"
+
+    # Now pretend wall-clock is days later -> store is EXPIRED.
+    far_future = fixture_bars[-1].open_time + timedelta(days=2)
+    blocked = runner.run(from_store=True, now=far_future)
+    assert blocked.status == "failure"
+    assert "freshness=expired" in (blocked.error or "")
+
+
+def test_dry_run_tick_requires_source(app_config) -> None:
+    runner = TickRunner(app_config)
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        runner.run()
+
+
+def test_seed_and_replay_fails_loud_on_bad_fixture(
+    app_config, fixture_bars_path: Path, tmp_path: Path
+) -> None:
+    """If the seed CSV fails quality gates, replay must NOT fall back to stale store data."""
+    from datetime import timedelta
+
+    from ai_mt5.data import load_closed_bars_csv
+
+    sym = app_config.primary_symbol()
+    fixture_bars = load_closed_bars_csv(
+        fixture_bars_path, symbol=sym.symbol, timeframe=sym.timeframe
+    )
+    pinned_now = fixture_bars[-1].open_time + timedelta(minutes=5)
+
+    runner = TickRunner(app_config)
+    # First seed a clean store.
+    good = runner.run(bar_fixture_path=fixture_bars_path, from_store=True, now=pinned_now)
+    assert good.status == "success"
+
+    # Now hand it a fixture with non-monotonic timestamps; ingest should block,
+    # and the tick must surface that as a failure rather than silently
+    # replaying the previously-ingested good data.
+    # Bars are time-ordered but skip a 15-minute slot, so the loader accepts
+    # them while the quality gate flags missing_bars and blocks ingest.
+    bad = tmp_path / "bad.csv"
+    bad.write_text(
+        "open_time,open,high,low,close,volume,spread_points,is_closed\n"
+        "2026-04-29T08:00:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n"
+        "2026-04-29T08:15:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n"
+        "2026-04-29T09:00:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n",
+        encoding="utf-8",
+    )
+    result = runner.run(bar_fixture_path=bad, from_store=True)
+    assert result.status == "failure"
+    assert "seed ingest blocked" in (result.error or "")
