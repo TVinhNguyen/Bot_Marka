@@ -78,3 +78,43 @@ def test_tick_does_not_crash_when_store_is_empty(app_config, fixture_bars_path: 
     # Fixture-only tick sets freshness against fixture latest_ts, which ignores the store.
     # But the freshness helper wrapper reads from the store; ensure no crash either way.
     assert result.status == "success"
+
+
+def test_fixture_tick_not_blocked_by_stale_store(app_config, fixture_bars_path: Path) -> None:
+    """Pre-existing stale store data must NOT block a fixture-only tick.
+
+    The store is the source of truth only for ``--from-store`` replay.
+    When the operator runs the smoke-test fixture path, the bars from the
+    CSV are authoritative and the local store may legitimately be empty
+    or arbitrarily out of date.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from ai_mt5.data import BarStore
+    from ai_mt5.domain.bar import Bar
+
+    # Seed the store with one ancient bar so freshness against the fixture's
+    # last bar is EXPIRED.
+    sym = app_config.primary_symbol()
+    store = BarStore(app_config.storage.bars_path)
+    ancient = datetime(1970, 1, 1, tzinfo=UTC)
+    store.append_many(
+        [
+            Bar(
+                symbol=sym.symbol,
+                timeframe=sym.timeframe,
+                open_time=ancient + timedelta(minutes=15 * i),
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=1.0,
+                spread_points=0,
+            )
+            for i in range(2)
+        ]
+    )
+
+    runner = TickRunner(app_config)
+    result = runner.run(bar_fixture_path=fixture_bars_path)
+    assert result.status == "success", result.error

@@ -231,8 +231,14 @@ class TickRunner:
                     expired_after_bars=self._cfg.data_quality.expired_after_bars,
                 )
                 self._audit_freshness(trace_id, freshness)
+                # Only block on store freshness when the tick is actually
+                # replaying from the store. In the CSV-fixture path the bars
+                # are authoritative and the local store may legitimately be
+                # empty or out of date; we still emit the freshness audit
+                # record above for visibility.
                 if (
-                    self._cfg.data_quality.block_tick_on_expired
+                    from_store
+                    and self._cfg.data_quality.block_tick_on_expired
                     and freshness.state is FreshnessState.EXPIRED
                 ):
                     raise DataQualityError(
