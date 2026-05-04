@@ -230,10 +230,7 @@ class TickRunner:
                 # ``block_tick_on_expired`` guard. Default to wall-clock time
                 # for from_store, while letting callers pin ``now`` for
                 # deterministic tests.
-                if from_store:
-                    freshness_now = now or utcnow()
-                else:
-                    freshness_now = bars[-1].open_time
+                freshness_now = (now or utcnow()) if from_store else bars[-1].open_time
                 freshness = self._bar_store.freshness(
                     symbol=symbol.symbol,
                     timeframe=symbol.timeframe,
