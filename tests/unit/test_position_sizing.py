@@ -107,3 +107,46 @@ def test_risk_exceeds_max_cap_after_step_rounding() -> None:
     )
     assert not res.approved
     assert any(r in res.rejected_by for r in ("risk_exceeds_max_cap", "volume_below_min"))
+
+
+def test_confidence_factor_scales_volume_down(base_kwargs) -> None:
+    """A weaker signal must size smaller than a perfect one."""
+    strong = size_position(**base_kwargs, confidence_factor=1.0)
+    weak = size_position(**base_kwargs, confidence_factor=0.5)
+    assert strong.approved and weak.approved
+    assert weak.volume < strong.volume
+    assert weak.effective_risk_pct < strong.effective_risk_pct
+    assert weak.confidence_factor == pytest.approx(0.5)
+
+
+def test_confidence_factor_one_matches_legacy_sizing(base_kwargs) -> None:
+    legacy = size_position(**base_kwargs)
+    full = size_position(**base_kwargs, confidence_factor=1.0)
+    assert legacy.volume == full.volume
+    assert legacy.risk_amount == pytest.approx(full.risk_amount)
+
+
+def test_confidence_factor_clamps_to_min_risk_pct(base_kwargs) -> None:
+    """confidence_factor=0 must floor to min_risk_pct, not zero out the trade."""
+    res = size_position(**base_kwargs, confidence_factor=0.0)
+    if res.approved:
+        # With min_risk_pct floor, risk_amount must equal exactly min_risk_pct * equity
+        # (modulo broker step rounding).
+        assert res.effective_risk_pct == pytest.approx(base_kwargs["min_risk_pct"])
+    else:
+        # Or, if even the floor cannot be met by the broker step, reject cleanly.
+        assert res.rejected_by
+
+
+def test_confidence_factor_out_of_range_rejects(base_kwargs) -> None:
+    above = size_position(**base_kwargs, confidence_factor=1.5)
+    below = size_position(**base_kwargs, confidence_factor=-0.1)
+    assert "invalid_confidence_factor" in above.rejected_by
+    assert "invalid_confidence_factor" in below.rejected_by
+
+
+def test_confidence_factor_never_exceeds_max_cap(base_kwargs) -> None:
+    """Even with confidence_factor=1, the max_risk_pct cap must hold."""
+    res = size_position(**{**base_kwargs, "base_risk_pct": 0.005}, confidence_factor=1.0)
+    assert res.approved
+    assert res.risk_amount <= base_kwargs["equity"] * base_kwargs["max_risk_pct"] + 1e-6

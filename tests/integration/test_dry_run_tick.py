@@ -81,8 +81,12 @@ def test_full_pipeline_with_broker_snapshots_can_approve(
 ) -> None:
     """When the operator supplies account+market snapshots, the Risk gate runs.
 
-    The fixture data trends up so the Baseline emits BUY, which the Risk gate
-    must approve given a healthy account.
+    Per ADR 0007, sizing scales by ``MetaSignal.confidence * agreement``.
+    The Baseline's natural confidence on this short fixture is modest, so
+    one of two outcomes is acceptable: (a) the gate approves at a *smaller*
+    effective risk than ``base_risk_per_trade``, or (b) the floor falls
+    below the broker's step granularity and the gate rejects with
+    ``risk_below_min_cap``. Both outcomes are correct under the PRD.
     """
     runner = TickRunner(app_config)
     result = runner.run(
@@ -94,5 +98,9 @@ def test_full_pipeline_with_broker_snapshots_can_approve(
     assert result.forecast is not None
     if result.forecast.direction in ("BUY", "SELL"):
         assert result.risk_decision is not None
-        assert result.risk_decision.approved
-        assert result.risk_decision.side == result.forecast.direction
+        if result.risk_decision.approved:
+            assert result.risk_decision.side == result.forecast.direction
+            assert "confidence=" in result.risk_decision.reason
+            assert "effective_risk_pct=" in result.risk_decision.reason
+        else:
+            assert "risk_below_min_cap" in result.risk_decision.rejected_by

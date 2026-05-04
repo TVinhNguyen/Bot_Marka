@@ -84,6 +84,7 @@ class RiskManager:
         if not stops.approved:
             return RiskDecision.reject(stops.rejected_by, magic=self._magic, comment=self._comment)
 
+        confidence_factor = _confidence_factor(signal)
         sizing = size_position(
             equity=account.equity,
             base_risk_pct=self._cfg.base_risk_per_trade,
@@ -94,6 +95,7 @@ class RiskManager:
             volume_min=market.volume_min,
             volume_max=market.volume_max,
             volume_step=market.volume_step,
+            confidence_factor=confidence_factor,
         )
         if not sizing.approved:
             return RiskDecision.reject(sizing.rejected_by, magic=self._magic, comment=self._comment)
@@ -116,7 +118,9 @@ class RiskManager:
             comment=self._comment,
             reason=(
                 f"signal={side} score={signal.final_score:.4f} "
-                f"agreement={signal.agreement:.2f} risk={sizing.risk_amount:.2f}"
+                f"confidence={signal.confidence:.2f} agreement={signal.agreement:.2f} "
+                f"effective_risk_pct={sizing.effective_risk_pct:.5f} "
+                f"risk={sizing.risk_amount:.2f}"
             ),
             rejected_by=[],
         )
@@ -180,3 +184,17 @@ class RiskManager:
                 if reason not in out:
                     out.append(reason)
         return out
+
+
+def _confidence_factor(signal: MetaSignal) -> float:
+    """Combine Meta-Signal confidence and agreement into a sizing scalar.
+
+    Both inputs live in ``[0, 1]``; the product is the simplest defensible
+    multiplier that punishes both *low conviction* (uncertain forecast) and
+    *low consensus* (component forecasts disagreeing). Floors and ceilings
+    are applied downstream by ``size_position`` so the final risk still
+    respects ``min_risk_per_trade`` / ``max_risk_per_trade``.
+    """
+    confidence = max(0.0, min(1.0, signal.confidence))
+    agreement = max(0.0, min(1.0, signal.agreement))
+    return confidence * agreement
