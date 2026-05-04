@@ -150,6 +150,7 @@ class TickRunner:
         from_store: bool = False,
         account: AccountSnapshot | None = None,
         market: MarketSnapshot | None = None,
+        now: datetime | None = None,
     ) -> TickResult:
         """Run one dry_run tick.
 
@@ -223,10 +224,20 @@ class TickRunner:
                         [issue.message for issue in data_quality.blocking_issues]
                     )
 
+                # When replaying from the store, ``bars[-1].open_time`` IS the
+                # store's latest bar, so using it as ``now`` would always yield
+                # ``lag=0`` and ``FreshnessState.FRESH`` -- defeating the
+                # ``block_tick_on_expired`` guard. Default to wall-clock time
+                # for from_store, while letting callers pin ``now`` for
+                # deterministic tests.
+                if from_store:
+                    freshness_now = now or utcnow()
+                else:
+                    freshness_now = bars[-1].open_time
                 freshness = self._bar_store.freshness(
                     symbol=symbol.symbol,
                     timeframe=symbol.timeframe,
-                    now=bars[-1].open_time,
+                    now=freshness_now,
                     stale_after_bars=self._cfg.data_quality.stale_after_bars,
                     expired_after_bars=self._cfg.data_quality.expired_after_bars,
                 )
