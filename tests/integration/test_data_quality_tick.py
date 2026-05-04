@@ -126,8 +126,6 @@ def test_audit_freshness_records_null_lag_for_empty_store(
     """``lag_bars`` must serialise as JSON null, not the invalid ``Infinity``."""
     import json
 
-    from ai_mt5.audit.trail import JsonlAuditTrail
-
     runner = TickRunner(app_config)
     runner.run(bar_fixture_path=fixture_bars_path)
 
