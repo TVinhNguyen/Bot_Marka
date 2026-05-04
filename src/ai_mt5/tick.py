@@ -179,7 +179,17 @@ class TickRunner:
                         symbol=symbol.symbol,
                         timeframe=symbol.timeframe,
                     )
-                    self.ingest(seed)
+                    seed_report = self.ingest(seed)
+                    if not seed_report.ok:
+                        # Fail loud rather than silently replay whatever the
+                        # store already had: the operator asked us to use this
+                        # fixture and its quality gates blocked the write.
+                        raise DataQualityError(
+                            [
+                                f"seed ingest blocked: {issue.message}"
+                                for issue in seed_report.blocking_issues
+                            ]
+                        )
                 if from_store:
                     source = f"store:{self._bar_store.path_for(symbol.symbol, symbol.timeframe)}"
                 else:

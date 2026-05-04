@@ -125,3 +125,30 @@ def test_dry_run_tick_requires_source(app_config) -> None:
 
     with _pytest.raises(ValueError):
         runner.run()
+
+
+def test_seed_and_replay_fails_loud_on_bad_fixture(
+    app_config, fixture_bars_path: Path, tmp_path: Path
+) -> None:
+    """If the seed CSV fails quality gates, replay must NOT fall back to stale store data."""
+    runner = TickRunner(app_config)
+    # First seed a clean store.
+    good = runner.run(bar_fixture_path=fixture_bars_path, from_store=True)
+    assert good.status == "success"
+
+    # Now hand it a fixture with non-monotonic timestamps; ingest should block,
+    # and the tick must surface that as a failure rather than silently
+    # replaying the previously-ingested good data.
+    # Bars are time-ordered but skip a 15-minute slot, so the loader accepts
+    # them while the quality gate flags missing_bars and blocks ingest.
+    bad = tmp_path / "bad.csv"
+    bad.write_text(
+        "open_time,open,high,low,close,volume,spread_points,is_closed\n"
+        "2026-04-29T08:00:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n"
+        "2026-04-29T08:15:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n"
+        "2026-04-29T09:00:00+00:00,1.07,1.071,1.069,1.0705,1000,12,true\n",
+        encoding="utf-8",
+    )
+    result = runner.run(bar_fixture_path=bad, from_store=True)
+    assert result.status == "failure"
+    assert "seed ingest blocked" in (result.error or "")
