@@ -107,7 +107,10 @@ class Ensemble:
         )
 
         # Confidence: mean of component confidences weighted, damped by
-        # agreement and Event Risk.
+        # Event Risk. Per ADR 0007, confidence and agreement are
+        # *independent* sizing inputs; sizing multiplies them downstream
+        # in the Risk gate, so we must NOT also multiply by agreement here
+        # (or it would be applied quadratically).
         component_conf = (
             sum(weights.get(f.model_name, 0.0) * f.confidence for f in valid) if weights else 0.0
         )
@@ -116,7 +119,7 @@ class Ensemble:
                 0.0,
                 min(
                     1.0,
-                    component_conf * agreement * (1.0 - event_penalty),
+                    component_conf * (1.0 - event_penalty),
                 ),
             )
         )
