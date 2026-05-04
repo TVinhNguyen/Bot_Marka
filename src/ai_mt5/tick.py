@@ -30,14 +30,18 @@ from .data import (
     ingest_bars,
     load_closed_bars_csv,
 )
+from .data.features import FeatureSet
 from .data.forecast_store import JsonlForecastStore
 from .data.quality import QualityConfig, QualityReport
 from .domain.bar import Bar
 from .domain.forecast import Forecast, MetaSignal
 from .domain.market import AccountSnapshot, MarketSnapshot
 from .domain.risk import RiskDecision
+from .ensemble import Ensemble
+from .models.protocol import AdapterError, ModelAdapter
 from .risk import RiskManager
 from .risk.kill_switch import FileKillSwitch, KillSwitch
+from .text.event_risk import EventRiskAdapter, EventRiskOutput
 from .utils.logging_setup import get_logger
 from .utils.time_utils import to_iso, utcnow
 from .utils.tracing import with_trace_id
@@ -83,6 +87,9 @@ class TickRunner:
         kill_switch: KillSwitch | None = None,
         baseline: BaselineAdapter | None = None,
         bar_store: BarStore | None = None,
+        adapters: list[ModelAdapter] | None = None,
+        ensemble: Ensemble | None = None,
+        event_risk: EventRiskAdapter | None = None,
     ) -> None:
         self._cfg = config
         self._audit = audit or JsonlAuditTrail(Path(config.storage.audit_path) / "audit.jsonl")
@@ -92,6 +99,9 @@ class TickRunner:
         self._kill = kill_switch or FileKillSwitch(config.risk.kill_switch_file)
         self._baseline = baseline or BaselineAdapter()
         self._bar_store = bar_store or BarStore(config.storage.bars_path)
+        self._adapters: list[ModelAdapter] = list(adapters or [])
+        self._ensemble = ensemble or Ensemble()
+        self._event_risk = event_risk
         self._risk = RiskManager(
             config.risk,
             self._kill,
@@ -259,18 +269,39 @@ class TickRunner:
                 history = bars[:-1]
                 decision_bar = bars[-1]
                 features = build_features(history, decision_bar)
-                forecast = self._baseline.forecast(
+
+                forecasts, failures = self._collect_forecasts(
+                    features, symbol=symbol, trace_id=trace_id
+                )
+                # Baseline is always a component; it uses the same FeatureSet
+                # so persistence + metadata stay consistent.
+                baseline_forecast = self._baseline.forecast(
                     features, symbol=symbol.symbol, timeframe=symbol.timeframe
                 )
-                self._forecast_store.append(forecast)
-                self._audit_forecast(trace_id, forecast)
+                forecasts.insert(0, baseline_forecast)
+                for fc in forecasts:
+                    self._forecast_store.append(fc)
+                    self._audit_forecast(trace_id, fc)
 
-                # In this slice the ensemble degenerates to one model; we wrap
-                # the Baseline Forecast in a single-component MetaSignal so
-                # downstream risk logic uses the same contract it will use in
-                # production.
-                signal = self._wrap_meta_signal(forecast)
+                event_risk_output = self._evaluate_event_risk(
+                    symbol=symbol.symbol, as_of=decision_bar.open_time
+                )
+                if event_risk_output is not None:
+                    self._audit_event_risk(trace_id, event_risk_output)
+
+                signal = self._ensemble.combine(
+                    forecasts,
+                    event_risk=event_risk_output,
+                    spread_points=decision_bar.spread_points,
+                    n_adapter_failures=failures,
+                    n_adapter_total=len(self._adapters) + 1,  # +1 for baseline
+                )
                 self._audit_meta_signal(trace_id, signal)
+
+                # The primary forecast field remains the Baseline for audit
+                # continuity; the ensemble components are attached via
+                # ``signal.components``.
+                forecast = baseline_forecast
 
                 if account is not None and market is not None:
                     decision = self._risk.evaluate(
@@ -329,21 +360,36 @@ class TickRunner:
             config=self._quality_config(),
         )
 
-    def _wrap_meta_signal(self, forecast: Forecast) -> MetaSignal:
-        return MetaSignal(
-            direction=forecast.direction,
-            final_score=forecast.score,
-            raw_score=forecast.raw_score,
-            agreement=1.0,  # only one model active in this slice
-            confidence=forecast.confidence,
-            cost_penalty=0.0,
-            uncertainty_penalty=forecast.uncertainty,
-            event_penalty=0.0,
-            veto_reasons=[],
-            reason=forecast.reason,
-            components={forecast.model_name: forecast},
-            timestamp=forecast.timestamp,
-        )
+    def _collect_forecasts(
+        self,
+        features: FeatureSet,
+        *,
+        symbol: SymbolTimeframe,
+        trace_id: str,
+    ) -> tuple[list[Forecast], int]:
+        """Run every configured :class:`ModelAdapter`, returning forecasts + failures."""
+        forecasts: list[Forecast] = []
+        failures = 0
+        for adapter in self._adapters:
+            try:
+                fc = adapter.forecast(features, symbol=symbol.symbol, timeframe=symbol.timeframe)
+            except AdapterError as exc:
+                failures += 1
+                self._audit_adapter_failure(trace_id, adapter.name, repr(exc))
+                self._log.error(
+                    "tick.adapter_failure",
+                    adapter=adapter.name,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                continue
+            forecasts.append(fc)
+        return forecasts, failures
+
+    def _evaluate_event_risk(self, *, symbol: str, as_of: datetime) -> EventRiskOutput | None:
+        if self._event_risk is None:
+            return None
+        return self._event_risk.evaluate(symbol=symbol, as_of=as_of)
 
     def _record_only_hold(self, signal: MetaSignal) -> RiskDecision:
         return RiskDecision.reject(
@@ -493,6 +539,32 @@ class TickRunner:
                         None if freshness.lag_bars == float("inf") else freshness.lag_bars
                     ),
                 },
+            )
+        )
+
+    def _audit_event_risk(self, trace_id: str, output: EventRiskOutput) -> None:
+        self._audit.append(
+            AuditRecord(
+                kind="event_risk",
+                trace_id=trace_id,
+                payload={
+                    "symbol": output.symbol,
+                    "as_of": to_iso(output.as_of),
+                    "event_risk": output.event_risk,
+                    "sentiment": output.sentiment,
+                    "direction_bias": output.direction_bias,
+                    "trade_permission": output.trade_permission,
+                    "reason": output.reason,
+                },
+            )
+        )
+
+    def _audit_adapter_failure(self, trace_id: str, adapter_name: str, error: str) -> None:
+        self._audit.append(
+            AuditRecord(
+                kind="adapter_failure",
+                trace_id=trace_id,
+                payload={"adapter": adapter_name, "error": error},
             )
         )
 
