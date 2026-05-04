@@ -486,7 +486,12 @@ class TickRunner:
                         else None
                     ),
                     "checked_at": to_iso(freshness.checked_at),
-                    "lag_bars": freshness.lag_bars,
+                    # ``float('inf')`` would serialise as the non-standard
+                    # ``Infinity`` token; emit ``null`` for an empty store
+                    # so the audit JSONL stays RFC 8259-compliant.
+                    "lag_bars": (
+                        None if freshness.lag_bars == float("inf") else freshness.lag_bars
+                    ),
                 },
             )
         )

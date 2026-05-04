@@ -118,3 +118,24 @@ def test_fixture_tick_not_blocked_by_stale_store(app_config, fixture_bars_path: 
     runner = TickRunner(app_config)
     result = runner.run(bar_fixture_path=fixture_bars_path)
     assert result.status == "success", result.error
+
+
+def test_audit_freshness_records_null_lag_for_empty_store(
+    app_config, fixture_bars_path: Path
+) -> None:
+    """``lag_bars`` must serialise as JSON null, not the invalid ``Infinity``."""
+    import json
+
+    from ai_mt5.audit.trail import JsonlAuditTrail
+
+    runner = TickRunner(app_config)
+    runner.run(bar_fixture_path=fixture_bars_path)
+
+    audit_path = Path(app_config.storage.audit_path) / "audit.jsonl"
+    raw = audit_path.read_text(encoding="utf-8")
+    # Every line must round-trip through standard JSON (no ``Infinity`` token).
+    assert "Infinity" not in raw
+    records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    fresh = [r for r in records if r.get("kind") == "data_freshness"]
+    assert fresh, "expected a data_freshness audit record"
+    assert fresh[0]["payload"]["lag_bars"] is None
