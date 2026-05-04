@@ -162,6 +162,7 @@ class WalkForwardEngine:
             history = bars[: i + 1]
             decision_bar = bars[i]
             forecasts: dict[str, Forecast] = {}
+            n_failures = 0
             for adapter in self._adapters:
                 try:
                     features = build_features(history[:-1], decision_bar=history[-1])
@@ -169,6 +170,9 @@ class WalkForwardEngine:
                         features, symbol=self._cfg.symbol, timeframe=self._cfg.timeframe
                     )
                 except AdapterError:
+                    # Match live tick parity: count failed adapters so the
+                    # Ensemble can apply the adapter_failure_rate veto.
+                    n_failures += 1
                     continue
                 except ValueError:
                     # build_features rejects empty history; skip until warmup.
@@ -188,10 +192,11 @@ class WalkForwardEngine:
                 )
 
             # Ensemble pipeline: all valid forecasts -> Meta-Signal.
-            if forecasts:
+            if forecasts or n_failures:
                 meta = self._ensemble.combine(
                     forecasts=list(forecasts.values()),
                     spread_points=decision_bar.spread_points,
+                    n_adapter_failures=n_failures,
                     n_adapter_total=len(self._adapters),
                 )
                 self._step_pipeline(

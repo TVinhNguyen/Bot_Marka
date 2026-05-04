@@ -72,15 +72,38 @@ def test_compute_metrics_calmar_zero_when_no_drawdown() -> None:
 
 
 def test_compute_metrics_calmar_uses_drawdown_fraction() -> None:
+    bars_per_year = 24_000.0
+    bars_per_trade = 4.0
     m = compute_metrics(
         [50.0, -200.0, 100.0],
         initial_equity=1_000.0,
-        bars_per_year=24_000.0,
+        bars_per_year=bars_per_year,
+        bars_per_trade=bars_per_trade,
     )
     # -200 after first trade: peak 1050 -> trough 850 -> dd_frac = 200/1050
     assert m.max_drawdown_pct == pytest.approx(200.0 / 1050.0)
-    expected_calmar = (-50.0 / 1_000.0) / (200.0 / 1050.0)
+    # Calmar must be annualised: raw_return = -50/1000, scale by bars_per_year
+    # over the window's bar span (n_trades * bars_per_trade = 12 bars).
+    raw_return = -50.0 / 1_000.0
+    annualised = raw_return * (bars_per_year / (3 * bars_per_trade))
+    expected_calmar = annualised / (200.0 / 1050.0)
     assert m.calmar == pytest.approx(expected_calmar)
+
+
+def test_compute_metrics_calmar_invariant_to_window_length() -> None:
+    """Doubling bars_per_trade halves the annualisation factor.
+
+    Calmar must scale linearly with the annualisation factor, so the same
+    PnL series in a window twice as long should yield half the Calmar.
+    """
+    pnls = [10.0, -50.0, 5.0]
+    m_short = compute_metrics(
+        pnls, initial_equity=1_000.0, bars_per_year=24_000.0, bars_per_trade=4.0
+    )
+    m_long = compute_metrics(
+        pnls, initial_equity=1_000.0, bars_per_year=24_000.0, bars_per_trade=8.0
+    )
+    assert m_long.calmar == pytest.approx(m_short.calmar / 2.0)
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0])

@@ -30,7 +30,10 @@ class BacktestMetrics:
         max_drawdown_pct: ``max_drawdown / max(running_peak)``, in [0, 1].
         sharpe: Annualised Sharpe ratio over per-trade returns (zero
             risk-free assumption). ``0.0`` when stdev is 0 or trade count <2.
-        calmar: ``annualised_return / max_drawdown_pct`` (0.0 if no DD).
+        calmar: ``annualised_return / max_drawdown_pct`` (0.0 if no DD);
+            ``annualised_return = raw_return * bars_per_year /
+            (n_trades * bars_per_trade)`` so windows of different length
+            stay comparable.
         avg_trade: Mean per-trade net PnL.
         bars_per_year: Annualisation factor used for Sharpe/Calmar.
     """
@@ -134,8 +137,17 @@ def compute_metrics(
     else:
         sharpe = 0.0
 
-    annualised_return = gross / initial_equity
-    # Calmar uses *years*: scale gross return by bars_per_year / bars_in_window.
+    # Calmar uses *years*: annualise the raw return so windows of different
+    # length are comparable. ``total_bars`` is the wall-clock span the
+    # window covered (n_trades * bars_per_trade); for empty windows we
+    # short-circuit to 0.
+    raw_return = gross / initial_equity
+    total_bars = n * bars_per_trade
+    if total_bars > 0:
+        annualisation = bars_per_year / total_bars
+        annualised_return = raw_return * annualisation
+    else:
+        annualised_return = raw_return
     calmar = annualised_return / dd_frac if dd_frac > 0 else 0.0
 
     return BacktestMetrics(
