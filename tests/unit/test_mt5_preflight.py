@@ -142,6 +142,26 @@ def test_preflight_passes_on_healthy_terminal(app_config: AppConfig) -> None:
     }
 
 
+def test_preflight_order_check_comment_respects_31_char_limit(
+    app_config: AppConfig,
+) -> None:
+    """Regression: MT5 caps broker comments at 31 chars. The config
+    already allows up to 31, so suffixing "-preflight" must be truncated
+    or some brokers will reject the order_check, producing a spurious
+    failure that blocks the operator."""
+    long_comment = "a" * 31  # max allowed by config
+    cfg = app_config.model_copy(
+        update={
+            "execution": app_config.execution.model_copy(update={"order_comment": long_comment})
+        }
+    )
+    fake = _FakeMT5()
+    run_preflight(client=_client(fake), config=cfg, now=_now())
+    assert fake.last_order_check_request is not None
+    sent_comment = fake.last_order_check_request["comment"]
+    assert len(sent_comment) <= 31, f"comment {sent_comment!r} exceeds 31 chars"
+
+
 def test_preflight_fails_when_terminal_not_trade_allowed(app_config: AppConfig) -> None:
     fake = _FakeMT5()
     fake.terminal = _Terminal(connected=True, trade_allowed=False, name="MetaTrader 5")

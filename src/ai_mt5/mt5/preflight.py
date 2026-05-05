@@ -193,7 +193,11 @@ def run_preflight(
                     "price": ask,
                     "deviation": config.execution.deviation_points,
                     "magic": config.execution.magic,
-                    "comment": f"{config.execution.order_comment}-preflight",
+                    # MT5 caps the broker comment at 31 characters; the
+                    # config field allows up to 31 already, so suffixing
+                    # "-preflight" can overflow and trigger spurious
+                    # broker rejections. Truncate to be safe.
+                    "comment": f"{config.execution.order_comment}-preflight"[:31],
                     "type_time": "ORDER_TIME_GTC",
                     "type_filling": "ORDER_FILLING_IOC",
                 }
