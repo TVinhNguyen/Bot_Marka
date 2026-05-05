@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import click
 
+from .audit.trail import JsonlAuditTrail
 from .backtest import (
     BacktestConfig,
     BacktestRunSpec,
@@ -30,6 +31,8 @@ from .backtest import (
 )
 from .config import ConfigError, load_config
 from .data import BarStore, load_closed_bars_csv
+from .observability import build_health, build_period_report
+from .risk.kill_switch import FileKillSwitch
 from .tick import TickRunner
 from .utils.logging_setup import configure_logging
 
@@ -254,6 +257,96 @@ def backtest(
             sort_keys=True,
         )
     )
+
+
+@cli.command("health")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+def health(config_path: Path) -> None:
+    """Emit a JSON health snapshot covering data freshness, kill switch, MT5 stub, and models."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+
+    bar_store = BarStore(cfg.storage.bars_path)
+    audit = JsonlAuditTrail(Path(cfg.storage.audit_path) / "audit.jsonl")
+    kill_switch = FileKillSwitch(cfg.risk.kill_switch_file)
+    snapshot = build_health(
+        config=cfg,
+        bar_store=bar_store,
+        audit=audit,
+        kill_switch=kill_switch,
+        now=datetime.now(UTC),
+    )
+    click.echo(json.dumps(snapshot.to_dict(), sort_keys=True))
+    if snapshot.status.value == "unhealthy":
+        sys.exit(1)
+
+
+@cli.command("report")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--days",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Window size in days, ending at 'now' (1 = daily, 7 = weekly).",
+)
+@click.option(
+    "--format",
+    "report_format",
+    type=click.Choice(["json", "markdown"]),
+    default="json",
+    show_default=True,
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional file to write the report to (otherwise stdout).",
+)
+def report(config_path: Path, days: int, report_format: str, out_path: Path | None) -> None:
+    """Generate a daily/weekly operations report from the persisted audit trail."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+
+    audit = JsonlAuditTrail(Path(cfg.storage.audit_path) / "audit.jsonl")
+    records = audit.read_all()
+    now = datetime.now(UTC)
+    window_start = now - timedelta(days=days)
+    period_report = build_period_report(records, window_start=window_start, window_end=now)
+    payload = (
+        period_report.to_markdown()
+        if report_format == "markdown"
+        else json.dumps(period_report.to_dict(), sort_keys=True)
+    )
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(payload, encoding="utf-8")
+        click.echo(json.dumps({"out": str(out_path), "format": report_format}, sort_keys=True))
+    else:
+        click.echo(payload)
 
 
 def main() -> None:  # pragma: no cover -- thin wrapper

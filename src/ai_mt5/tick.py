@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .audit import AuditRecord, AuditTrail, JsonlAuditTrail
 from .baseline import BaselineAdapter
@@ -39,6 +40,21 @@ from .domain.market import AccountSnapshot, MarketSnapshot
 from .domain.risk import RiskDecision
 from .ensemble import Ensemble
 from .models.protocol import AdapterError, ModelAdapter
+from .observability.alerts import AlertManager, default_rules
+from .observability.metrics import (
+    DATA_FRESHNESS_LAG_BARS,
+    DRAWDOWN_PCT,
+    EQUITY,
+    ERRORS,
+    FORECASTS_EMITTED,
+    LATENCY_MS,
+    META_SIGNALS_EMITTED,
+    OPEN_POSITIONS,
+    RISK_DECISIONS,
+    SPREAD_POINTS,
+    MetricsRegistry,
+    register_default_metrics,
+)
 from .risk import RiskManager
 from .risk.kill_switch import FileKillSwitch, KillSwitch
 from .text.event_risk import EventRiskAdapter, EventRiskOutput
@@ -90,6 +106,8 @@ class TickRunner:
         adapters: list[ModelAdapter] | None = None,
         ensemble: Ensemble | None = None,
         event_risk: EventRiskAdapter | None = None,
+        metrics: MetricsRegistry | None = None,
+        alert_manager: AlertManager | None = None,
     ) -> None:
         self._cfg = config
         self._audit = audit or JsonlAuditTrail(Path(config.storage.audit_path) / "audit.jsonl")
@@ -108,7 +126,18 @@ class TickRunner:
             magic=config.execution.magic,
             order_comment=config.execution.order_comment,
         )
+        self._metrics = metrics or MetricsRegistry()
+        register_default_metrics(self._metrics)
+        self._alerts = alert_manager or AlertManager(default_rules())
         self._log = get_logger("ai_mt5.tick")
+
+    @property
+    def metrics(self) -> MetricsRegistry:
+        return self._metrics
+
+    @property
+    def alerts(self) -> AlertManager:
+        return self._alerts
 
     # -- data-health helpers -------------------------------------------------
 
@@ -182,6 +211,7 @@ class TickRunner:
             raise ValueError("run() requires either bar_fixture_path or from_store=True")
         symbol = self._cfg.primary_symbol()
         source: str
+        tick_started_at = utcnow()
         with with_trace_id() as trace_id:
             try:
                 if from_store and bar_fixture_path is not None:
@@ -282,6 +312,7 @@ class TickRunner:
                 for fc in forecasts:
                     self._forecast_store.append(fc)
                     self._audit_forecast(trace_id, fc)
+                self._metrics.inc(FORECASTS_EMITTED, by=len(forecasts))
 
                 event_risk_output = self._evaluate_event_risk(
                     symbol=symbol.symbol, as_of=decision_bar.open_time
@@ -297,6 +328,10 @@ class TickRunner:
                     n_adapter_total=len(self._adapters) + 1,  # +1 for baseline
                 )
                 self._audit_meta_signal(trace_id, signal)
+                self._metrics.inc(META_SIGNALS_EMITTED)
+                self._metrics.set_gauge(SPREAD_POINTS, float(decision_bar.spread_points))
+                if freshness.lag_bars != float("inf"):
+                    self._metrics.set_gauge(DATA_FRESHNESS_LAG_BARS, freshness.lag_bars)
 
                 # The primary forecast field remains the Baseline for audit
                 # continuity; the ensemble components are attached via
@@ -310,6 +345,21 @@ class TickRunner:
                 else:
                     decision = self._record_only_hold(signal)
                 self._audit_risk_decision(trace_id, decision, signal)
+                self._metrics.inc(
+                    RISK_DECISIONS,
+                    labels={"outcome": "approved" if decision.approved else "rejected"},
+                )
+                self._fire_observability_alerts(
+                    freshness=freshness,
+                    failures=failures,
+                    n_adapter_total=len(self._adapters) + 1,
+                    account=account,
+                    now=decision_bar.open_time,
+                )
+                self._metrics.observe(
+                    LATENCY_MS,
+                    (utcnow() - tick_started_at).total_seconds() * 1000.0,
+                )
 
                 self._audit_tick_success(trace_id, symbol, decision_bar, forecast, decision)
                 self._log.info(
@@ -332,6 +382,11 @@ class TickRunner:
 
             except Exception as exc:
                 self._audit_tick_failure(trace_id, symbol, repr(exc))
+                self._metrics.inc(ERRORS, labels={"kind": type(exc).__name__})
+                self._metrics.observe(
+                    LATENCY_MS,
+                    (utcnow() - tick_started_at).total_seconds() * 1000.0,
+                )
                 self._log.error(
                     "tick.failure",
                     error_type=type(exc).__name__,
@@ -385,6 +440,31 @@ class TickRunner:
                 continue
             forecasts.append(fc)
         return forecasts, failures
+
+    def _fire_observability_alerts(
+        self,
+        *,
+        freshness: FreshnessStatus,
+        failures: int,
+        n_adapter_total: int,
+        account: AccountSnapshot | None,
+        now: datetime,
+    ) -> None:
+        adapter_failure_rate = failures / n_adapter_total if n_adapter_total > 0 else 0.0
+        payload: dict[str, Any] = {
+            "symbol": freshness.symbol,
+            "timeframe": freshness.timeframe,
+            "freshness": str(freshness.state),
+            "lag_bars": (None if freshness.lag_bars == float("inf") else freshness.lag_bars),
+            "kill_switch_engaged": self._kill.is_engaged(),
+            "adapter_failure_rate": adapter_failure_rate,
+        }
+        if account is not None:
+            payload["drawdown_pct"] = account.drawdown_pct
+            self._metrics.set_gauge(EQUITY, account.equity)
+            self._metrics.set_gauge(DRAWDOWN_PCT, account.drawdown_pct)
+            self._metrics.set_gauge(OPEN_POSITIONS, float(account.open_positions))
+        self._alerts.evaluate(payload, now=now)
 
     def _evaluate_event_risk(self, *, symbol: str, as_of: datetime) -> EventRiskOutput | None:
         if self._event_risk is None:
