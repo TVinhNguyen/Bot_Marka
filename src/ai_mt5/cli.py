@@ -349,6 +349,60 @@ def report(config_path: Path, days: int, report_format: str, out_path: Path | No
         click.echo(payload)
 
 
+@cli.command("mt5-preflight")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--bar-count",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Number of closed bars to fetch from the broker for the quality check.",
+)
+@click.option(
+    "--volume",
+    "test_volume",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Volume passed to order_check (NEVER to order_send). Use the smallest accepted lot.",
+)
+def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None:
+    """Issue #3 — verify the live MT5 demo terminal can serve Closed Bars
+    and accept a synthetic order_check."""
+    cfg = load_config(config_path)
+    configure_logging(cfg.environment.log_level)
+    from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
+    from .mt5.preflight import run_preflight
+
+    bridge_cfg = MT5BridgeConfig.from_env()
+    client = MT5Client(bridge_cfg)
+    try:
+        client.connect()
+    except MT5ConnectionError as exc:
+        click.echo(json.dumps({"ok": False, "failures": [f"bridge_error:{exc}"]}, sort_keys=True))
+        sys.exit(1)
+    try:
+        report = run_preflight(
+            client=client,
+            config=cfg,
+            now=datetime.now(UTC),
+            bar_count=bar_count,
+            test_volume=test_volume,
+        )
+    finally:
+        client.disconnect()
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
 def main() -> None:  # pragma: no cover -- thin wrapper
     cli()
 

@@ -23,6 +23,14 @@ dev = [
     "hypothesis>=6.100,<7",
     "types-PyYAML",
 ]
+mt5 = [
+    # Linux-side RPyC client: connects to a Windows host running
+    # `python -m mt5linux <python.exe>` which exposes the official
+    # `MetaTrader5` package over RPyC. The `MetaTrader5` package itself
+    # is Windows-only and is therefore NOT a hard dependency of this
+    # project; install it on the bridge host, not on this VM.
+    "rpyc>=5.3,<7",
+]
 
 [project.scripts]
 ai-mt5 = "ai_mt5.cli:cli"
