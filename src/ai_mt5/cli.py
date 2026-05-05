@@ -15,10 +15,12 @@ Both commands share the same logging configuration as the runtime tick.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -347,6 +349,164 @@ def report(config_path: Path, days: int, report_format: str, out_path: Path | No
         click.echo(json.dumps({"out": str(out_path), "format": report_format}, sort_keys=True))
     else:
         click.echo(payload)
+
+
+@cli.command("mt5-preflight")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--bar-count",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Number of closed bars to fetch from the broker for the quality check.",
+)
+@click.option(
+    "--volume",
+    "test_volume",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Volume passed to order_check (NEVER to order_send). Use the smallest accepted lot.",
+)
+def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None:
+    """Issue #3 — verify the live MT5 demo terminal can serve Closed Bars
+    and accept a synthetic order_check."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+    from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
+    from .mt5.preflight import run_preflight
+
+    # Both from_env() (missing MT5_BRIDGE_HOST etc.) and connect()
+    # raise MT5ConnectionError. Wrap both so operators / CI always get
+    # the same structured JSON failure shape.
+    try:
+        bridge_cfg = MT5BridgeConfig.from_env()
+        client = MT5Client(bridge_cfg)
+        client.connect()
+    except MT5ConnectionError as exc:
+        click.echo(json.dumps({"ok": False, "failures": [f"bridge_error:{exc}"]}, sort_keys=True))
+        sys.exit(1)
+    try:
+        report = run_preflight(
+            client=client,
+            config=cfg,
+            now=datetime.now(UTC),
+            bar_count=bar_count,
+            test_volume=test_volume,
+        )
+    finally:
+        client.disconnect()
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
+@cli.command("reconcile")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--intent-log",
+    "intent_log_path",
+    type=click.Path(path_type=Path),
+    default=Path("data/state/intents.jsonl"),
+    show_default=True,
+    help="JSONL local intent ledger.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "JSONL audit trail to append the reconcile result to. Defaults to "
+        "<config.storage.audit_path>/audit.jsonl so reconcile reports stay "
+        "visible to 'ai-mt5 report' and 'ai-mt5 health'."
+    ),
+)
+def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path | None) -> None:
+    """Issue #5 — compare local intents to broker positions for the configured magic."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+
+    from .audit.trail import AuditRecord, JsonlAuditTrail
+    from .execution import BrokerPosition, LocalIntentLog, reconcile
+    from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
+
+    intent_log = LocalIntentLog(intent_log_path)
+    # Default to the audit path resolved from config so reconcile records
+    # land in the same trail as 'ai-mt5 health' / 'ai-mt5 report' read.
+    resolved_audit_path = audit_log_path or Path(cfg.storage.audit_path) / "audit.jsonl"
+    audit = JsonlAuditTrail(resolved_audit_path)
+    # Both from_env() (missing MT5_BRIDGE_HOST etc.) and connect()
+    # raise MT5ConnectionError. Wrap both so operators / CI always see
+    # the same structured JSON failure shape.
+    try:
+        bridge_cfg = MT5BridgeConfig.from_env()
+        client = MT5Client(bridge_cfg)
+        client.connect()
+    except MT5ConnectionError as exc:
+        click.echo(json.dumps({"ok": False, "error": f"bridge_error:{exc}"}, sort_keys=True))
+        sys.exit(1)
+    transport_error: Exception | None = None
+    broker_rows: list[dict[str, Any]] = []
+    try:
+        broker_rows = client.positions()
+    except (MT5ConnectionError, EOFError, ConnectionError, OSError, TimeoutError) as exc:
+        # RPyC transport errors (bridge drop mid-call) and
+        # MT5ConnectionError both need the same structured JSON shape
+        # the connect() handler above produces.
+        transport_error = exc
+    finally:
+        with contextlib.suppress(Exception):
+            client.disconnect()
+    if transport_error is not None:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"bridge_error:{type(transport_error).__name__}:{transport_error}",
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(1)
+    broker_positions = [BrokerPosition.from_dict(row) for row in broker_rows]
+    report = reconcile(
+        local_intents=intent_log.open_intents(),
+        broker_positions=broker_positions,
+        magic=cfg.execution.magic,
+    )
+    audit.append(
+        AuditRecord(
+            kind="reconcile.report",
+            trace_id=f"reconcile:{int(datetime.now(UTC).timestamp())}",
+            payload=report.to_dict(),
+        )
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
 
 
 def main() -> None:  # pragma: no cover -- thin wrapper
