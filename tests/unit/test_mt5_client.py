@@ -77,6 +77,15 @@ class _OrderCheckResult:
     margin_level: float = 9_900.0
 
 
+_FAKE_ENUM_CONSTS = {
+    "TRADE_ACTION_DEAL": 1,
+    "ORDER_TYPE_BUY": 0,
+    "ORDER_TYPE_SELL": 1,
+    "ORDER_TIME_GTC": 0,
+    "ORDER_FILLING_IOC": 1,
+}
+
+
 class _FakeMT5:
     """In-memory stand-in for the remote ``MetaTrader5`` module."""
 
@@ -88,8 +97,11 @@ class _FakeMT5:
         self.positions_value: list[_Position] = []
         self.next_order_check: _OrderCheckResult | None = _OrderCheckResult()
         self.symbols: dict[str, _Symbol] = {"EURUSD": _Symbol()}
+        self.last_order_check_request: dict[str, Any] | None = None
         # Expose constants like the real package does.
         for name, value in _FAKE_TIMEFRAMES.items():
+            setattr(self, name, value)
+        for name, value in _FAKE_ENUM_CONSTS.items():
             setattr(self, name, value)
 
     def initialize(self, **kwargs: Any) -> bool:
@@ -125,6 +137,7 @@ class _FakeMT5:
         return [p for p in self.positions_value if p.symbol == symbol]
 
     def order_check(self, request: dict[str, Any]) -> _OrderCheckResult | None:
+        self.last_order_check_request = request
         return self.next_order_check
 
 
@@ -242,6 +255,69 @@ def test_order_check_returns_typed_dict() -> None:
     )
     assert result["retcode"] == 10009
     assert result["comment"] == "ok"
+
+
+def test_order_check_resolves_string_enum_names_to_ints() -> None:
+    """The MT5 broker rejects string enum names — MT5Client must resolve them."""
+    fake = _FakeMT5()
+    client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)
+    client.order_check(
+        {
+            "action": "TRADE_ACTION_DEAL",
+            "symbol": "EURUSD",
+            "volume": 0.01,
+            "type": "ORDER_TYPE_BUY",
+            "price": 1.07,
+            "type_time": "ORDER_TIME_GTC",
+            "type_filling": "ORDER_FILLING_IOC",
+        }
+    )
+    forwarded = fake.last_order_check_request
+    assert forwarded is not None
+    # All four enum fields must have been resolved to the int constants
+    # the remote module exposes (string names would break a real broker).
+    assert forwarded["action"] == _FAKE_ENUM_CONSTS["TRADE_ACTION_DEAL"]
+    assert forwarded["type"] == _FAKE_ENUM_CONSTS["ORDER_TYPE_BUY"]
+    assert forwarded["type_time"] == _FAKE_ENUM_CONSTS["ORDER_TIME_GTC"]
+    assert forwarded["type_filling"] == _FAKE_ENUM_CONSTS["ORDER_FILLING_IOC"]
+    # Pass-through fields stay untouched.
+    assert forwarded["symbol"] == "EURUSD"
+    assert forwarded["volume"] == 0.01
+    assert forwarded["price"] == 1.07
+
+
+def test_order_check_rejects_unknown_constant_name() -> None:
+    fake = _FakeMT5()
+    client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)
+    with pytest.raises(ValueError, match="unknown MT5 constant"):
+        client.order_check(
+            {
+                "action": "TRADE_ACTION_BOGUS",
+                "symbol": "EURUSD",
+                "volume": 0.01,
+                "type": "ORDER_TYPE_BUY",
+                "price": 1.07,
+            }
+        )
+
+
+def test_order_check_passes_int_values_through() -> None:
+    """Pre-resolved int values should not be re-resolved (idempotent)."""
+    fake = _FakeMT5()
+    client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)
+    client.order_check(
+        {
+            "action": 1,
+            "symbol": "EURUSD",
+            "volume": 0.01,
+            "type": 0,
+            "price": 1.07,
+        }
+    )
+    forwarded = fake.last_order_check_request
+    assert forwarded is not None
+    assert forwarded["action"] == 1
+    assert forwarded["type"] == 0
 
 
 def test_methods_raise_when_disconnected() -> None:

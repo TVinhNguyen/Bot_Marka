@@ -104,9 +104,18 @@ _TIMEFRAME_NAMES = {
     "D1": "TIMEFRAME_D1",
 }
 
+# Attribute names of MT5 enum constants we use when building a trade
+# request. The strings here are *attribute names on the remote module*,
+# not protocol values: :meth:`MT5Client.order_check` resolves each one
+# via ``getattr(remote_mt5, name)`` to the integer the broker actually
+# expects. Callers should always pass strings — never assume an integer.
 ORDER_TYPE_BUY = "ORDER_TYPE_BUY"
 ORDER_TYPE_SELL = "ORDER_TYPE_SELL"
 TRADE_ACTION_DEAL = "TRADE_ACTION_DEAL"
+
+# Request fields whose values are MT5 enum constants and therefore need
+# attribute-name -> integer resolution before being sent over RPyC.
+_ENUM_REQUEST_FIELDS = ("action", "type", "type_time", "type_filling")
 
 
 class MT5Client:
@@ -285,6 +294,27 @@ class MT5Client:
 
     # -- write-equivalent (still safe — order_check is dry-run) ------------
 
+    def _resolve_enum_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Replace string enum names in ``request`` with the broker's int values.
+
+        MT5 expects integer constants on the wire (e.g. ``mt5.TRADE_ACTION_DEAL = 1``),
+        but callers in this codebase pass attribute-name strings so the
+        request payload survives in audit JSON unambiguously. This helper
+        looks up each enum field on the remote module via ``getattr`` —
+        the same trick :meth:`copy_rates_from_pos` uses for timeframes.
+        Unknown fields and non-string values pass through untouched so
+        callers can still pre-resolve constants if they want to.
+        """
+        mt5 = self._ensure()
+        resolved = dict(request)
+        for field in _ENUM_REQUEST_FIELDS:
+            value = resolved.get(field)
+            if isinstance(value, str):
+                if not hasattr(mt5, value):
+                    raise ValueError(f"unknown MT5 constant {value!r} for request field {field!r}")
+                resolved[field] = getattr(mt5, value)
+        return resolved
+
     def order_check(self, request: dict[str, Any]) -> dict[str, Any]:
         """Server-side validation of an order request — never executes.
 
@@ -293,7 +323,7 @@ class MT5Client:
         for the dry_run preflight in issue #3.
         """
         mt5 = self._ensure()
-        result = mt5.order_check(request)
+        result = mt5.order_check(self._resolve_enum_request(request))
         if result is None:
             err = mt5.last_error()
             raise MT5ConnectionError(f"order_check() returned None: {err}")

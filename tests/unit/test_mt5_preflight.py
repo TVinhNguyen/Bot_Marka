@@ -75,6 +75,11 @@ class _OrderResult:
 
 class _FakeMT5:
     TIMEFRAME_M15 = 15
+    TRADE_ACTION_DEAL = 1
+    ORDER_TYPE_BUY = 0
+    ORDER_TYPE_SELL = 1
+    ORDER_TIME_GTC = 0
+    ORDER_FILLING_IOC = 1
 
     def __init__(self) -> None:
         self.bars = _seed_bars()
@@ -83,6 +88,7 @@ class _FakeMT5:
         self.account = _Account()
         self.symbol = _Symbol()
         self.next_order_check = _OrderResult()
+        self.last_order_check_request: dict[str, Any] | None = None
 
     def initialize(self, **_: Any) -> bool:
         return True
@@ -113,7 +119,8 @@ class _FakeMT5:
     def positions_get(self, *, symbol: str | None = None) -> list[Any]:
         return []
 
-    def order_check(self, _request: dict[str, Any]) -> _OrderResult:
+    def order_check(self, request: dict[str, Any]) -> _OrderResult:
+        self.last_order_check_request = request
         return self.next_order_check
 
 
@@ -193,6 +200,21 @@ def test_preflight_quality_failures_surface(app_config: AppConfig) -> None:
     report = run_preflight(client=_client(fake), config=app_config, now=_now())
     assert not report.ok
     assert any(f.startswith("quality:") for f in report.failures)
+
+
+def test_preflight_resolves_enum_strings_to_ints_on_wire(app_config: AppConfig) -> None:
+    """Regression: the broker receives integer constants, never string names."""
+    fake = _FakeMT5()
+    run_preflight(client=_client(fake), config=app_config, now=_now())
+    request = fake.last_order_check_request
+    assert request is not None
+    assert request["action"] == fake.TRADE_ACTION_DEAL
+    assert request["type"] == fake.ORDER_TYPE_BUY
+    assert request["type_time"] == fake.ORDER_TIME_GTC
+    assert request["type_filling"] == fake.ORDER_FILLING_IOC
+    # Volume and symbol are pass-through.
+    assert request["symbol"] == "EURUSD"
+    assert request["volume"] == 0.01
 
 
 def test_preflight_to_dict_round_trip(app_config: AppConfig) -> None:

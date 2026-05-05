@@ -376,7 +376,11 @@ def report(config_path: Path, days: int, report_format: str, out_path: Path | No
 def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None:
     """Issue #3 — verify the live MT5 demo terminal can serve Closed Bars
     and accept a synthetic order_check."""
-    cfg = load_config(config_path)
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
     configure_logging(cfg.environment.log_level)
     from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
     from .mt5.preflight import run_preflight
