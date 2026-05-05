@@ -145,6 +145,52 @@ def test_reconcile_cli_writes_to_configured_audit_path(tmp_path: Path, monkeypat
     )  # don't fail on accidental sibling state
 
 
+def test_reconcile_cli_emits_structured_json_when_positions_call_drops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: an RPyC transport drop mid-call (EOFError) during
+    client.positions() must surface as structured JSON, not a raw
+    Python traceback. The CLI's earlier connect() handler already
+    handles MT5ConnectionError; this exercises the broader transport
+    handler around the positions() call."""
+    cfg_path = _write_config(tmp_path)
+    intents_path = tmp_path / "intents.jsonl"
+    intents_path.touch()
+
+    class _DroppingClient(_StubMT5Client):
+        def positions(self, symbol: str | None = None) -> list[dict[str, object]]:
+            raise EOFError("RPyC connection reset by peer")
+
+    import ai_mt5.mt5 as mt5_module
+
+    monkeypatch.setattr(mt5_module, "MT5Client", _DroppingClient)
+    monkeypatch.setattr(
+        mt5_module.MT5BridgeConfig,
+        "from_env",
+        classmethod(lambda _cls, prefix="MT5": mt5_module.MT5BridgeConfig(host="stub")),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "reconcile",
+            "--config",
+            str(cfg_path),
+            "--intent-log",
+            str(intents_path),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    payload_lines = [ln for ln in result.output.splitlines() if ln.startswith("{")]
+    assert payload_lines, f"expected JSON payload, got: {result.output!r}"
+    payload = json.loads(payload_lines[-1])
+    assert payload["ok"] is False
+    assert "bridge_error" in payload["error"]
+    assert "EOFError" in payload["error"]
+
+
 def test_reconcile_cli_emits_structured_json_when_bridge_host_missing(
     tmp_path: Path, monkeypatch
 ) -> None:

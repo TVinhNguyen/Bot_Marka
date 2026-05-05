@@ -15,10 +15,12 @@ Both commands share the same logging configuration as the runtime tick.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -466,10 +468,29 @@ def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path
     except MT5ConnectionError as exc:
         click.echo(json.dumps({"ok": False, "error": f"bridge_error:{exc}"}, sort_keys=True))
         sys.exit(1)
+    transport_error: Exception | None = None
+    broker_rows: list[dict[str, Any]] = []
     try:
         broker_rows = client.positions()
+    except (MT5ConnectionError, EOFError, ConnectionError, OSError, TimeoutError) as exc:
+        # RPyC transport errors (bridge drop mid-call) and
+        # MT5ConnectionError both need the same structured JSON shape
+        # the connect() handler above produces.
+        transport_error = exc
     finally:
-        client.disconnect()
+        with contextlib.suppress(Exception):
+            client.disconnect()
+    if transport_error is not None:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"bridge_error:{type(transport_error).__name__}:{transport_error}",
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(1)
     broker_positions = [BrokerPosition.from_dict(row) for row in broker_rows]
     report = reconcile(
         local_intents=intent_log.open_intents(),
