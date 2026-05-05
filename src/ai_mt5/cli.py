@@ -385,9 +385,12 @@ def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None
     from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
     from .mt5.preflight import run_preflight
 
-    bridge_cfg = MT5BridgeConfig.from_env()
-    client = MT5Client(bridge_cfg)
+    # Both from_env() (missing MT5_BRIDGE_HOST etc.) and connect()
+    # raise MT5ConnectionError. Wrap both so operators / CI always get
+    # the same structured JSON failure shape.
     try:
+        bridge_cfg = MT5BridgeConfig.from_env()
+        client = MT5Client(bridge_cfg)
         client.connect()
     except MT5ConnectionError as exc:
         click.echo(json.dumps({"ok": False, "failures": [f"bridge_error:{exc}"]}, sort_keys=True))
