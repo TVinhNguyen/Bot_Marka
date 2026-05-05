@@ -27,6 +27,7 @@ audit trail.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -167,31 +168,48 @@ def reconcile(
     ]
 
     by_local: dict[tuple[int, str], LocalIntent] = {_match_key(i): i for i in open_locals}
-    by_broker: dict[tuple[int, str], BrokerPosition] = {_broker_key(p): p for p in ours}
+    # Multiple broker positions can share (magic, comment) — for example
+    # an order_send timeout that fired twice and produced two fills. We
+    # keep the full list per key so duplicates surface as broker_only
+    # (unmanaged) instead of being silently dropped.
+    by_broker: dict[tuple[int, str], list[BrokerPosition]] = defaultdict(list)
+    for p in ours:
+        by_broker[_broker_key(p)].append(p)
 
     matched: list[tuple[LocalIntent, BrokerPosition]] = []
     timeout_pending: list[LocalIntent] = []
     matched_keys: set[tuple[int, str]] = set()
+    used_broker_ids: set[int] = set()
 
     # Match by (magic, comment). Ticket-based match is layered on top:
     # if a local intent already has a ticket, it must agree with the
-    # broker side.
+    # broker side. With duplicates, we prefer the broker position whose
+    # ticket equals the local intent's ticket (when set); otherwise we
+    # take the first one and report the rest as broker_only.
     for key, intent in by_local.items():
-        broker = by_broker.get(key)
-        if broker is None:
+        candidates = by_broker.get(key, [])
+        if not candidates:
             continue
-        if intent.ticket is not None and intent.ticket != broker.ticket:
-            # Comment matches but ticket disagrees → treat as
-            # local-only so the operator can decide rather than
-            # silently rebinding the intent to a different ticket.
-            continue
+        if intent.ticket is not None:
+            broker = next((c for c in candidates if c.ticket == intent.ticket), None)
+            if broker is None:
+                # Comment matches but no ticket agreement → treat as
+                # local-only so the operator can decide rather than
+                # silently rebinding the intent to a different ticket.
+                # The candidate brokers fall through to broker_only.
+                continue
+        else:
+            broker = candidates[0]
+        used_broker_ids.add(id(broker))
         matched_keys.add(key)
         if intent.state == "timeout":
             timeout_pending.append(intent)
         else:
             matched.append((intent, broker))
 
-    broker_only = tuple(p for k, p in by_broker.items() if k not in matched_keys)
+    # Anything not consumed by a matched intent is broker_only — including
+    # the *extra* duplicates with the same key as a matched position.
+    broker_only = tuple(p for p in ours if id(p) not in used_broker_ids)
     local_only = tuple(
         i for k, i in by_local.items() if k not in matched_keys and i.state != "timeout"
     )

@@ -73,6 +73,47 @@ def test_broker_only_position_is_unmanaged() -> None:
     assert report.timeout_pending == ()
 
 
+def test_duplicate_broker_positions_surface_extras_as_unmanaged() -> None:
+    """Regression: when the broker has two open positions sharing the
+    same (magic, comment) — e.g. an order_send timeout that fired twice
+    and produced two fills — only ONE may match the local intent.
+    The duplicate must surface as broker_only (unmanaged) rather than
+    being silently dropped, otherwise the operator never sees the
+    second position. This is the exact 'double position' scenario
+    ADR 0011 calls out and the issue #5 acceptance criterion
+    'broker positions belonging to our magic the bot does not know
+    about are flagged as unmanaged'."""
+    intent = _intent(state="submitted", ticket=100)
+    matched_pos = _broker(intent=intent, ticket=100)
+    duplicate_pos = _broker(intent=intent, ticket=101)  # same comment, different ticket
+    report = reconcile(
+        local_intents=[intent],
+        broker_positions=[matched_pos, duplicate_pos],
+        magic=MAGIC,
+    )
+    assert report.ok is False
+    assert report.matched == ((intent, matched_pos),)
+    assert report.broker_only == (duplicate_pos,), (
+        f"expected the second broker position to surface as broker_only, got {report.broker_only}"
+    )
+
+
+def test_duplicate_broker_positions_without_ticket_picks_first() -> None:
+    """Regression: when the local intent has no ticket bound yet, the
+    reconciler picks the first broker candidate as the match and the
+    rest fall through to broker_only — never silently dropped."""
+    intent = _intent(state="submitted", ticket=None)
+    first = _broker(intent=intent, ticket=100)
+    second = _broker(intent=intent, ticket=101)
+    report = reconcile(
+        local_intents=[intent],
+        broker_positions=[first, second],
+        magic=MAGIC,
+    )
+    assert report.matched == ((intent, first),)
+    assert report.broker_only == (second,)
+
+
 def test_local_only_intent_triggers_alert() -> None:
     """Bot believes a trade is open but the broker has no matching position."""
     intent = _intent(state="submitted", ticket=999)
