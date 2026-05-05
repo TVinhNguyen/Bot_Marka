@@ -509,6 +509,122 @@ def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path
         sys.exit(1)
 
 
+@cli.command("promotion-check")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config to validate.",
+)
+@click.option(
+    "--target",
+    "target",
+    type=click.Choice(["demo", "staging", "small_live"]),
+    required=True,
+    help="Mode the operator wants to promote to.",
+)
+@click.option(
+    "--reports-dir",
+    "reports_dir",
+    type=click.Path(path_type=Path),
+    default=Path("reports"),
+    show_default=True,
+    help="Directory holding backtest *.json reports.",
+)
+@click.option(
+    "--max-backtest-age-days",
+    "max_backtest_age_days",
+    type=int,
+    default=7,
+    show_default=True,
+)
+def promotion_check(
+    config_path: Path,
+    target: str,
+    reports_dir: Path,
+    max_backtest_age_days: int,
+) -> None:
+    """Run the promotion checklist for a target mode and emit JSON.
+
+    Exit code is 0 when every gate passes, 1 otherwise. The output is
+    a stable JSON object suitable for CI and operator dashboards.
+    """
+    from .runtime import RuntimeMode, run_promotion_checks
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(json.dumps({"ok": False, "error": f"config_error:{exc}"}, sort_keys=True))
+        sys.exit(2)
+    report = run_promotion_checks(
+        config=cfg,
+        target=RuntimeMode(target),
+        backtest_reports_dir=reports_dir,
+        backtest_max_age_days=max_backtest_age_days,
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
+@cli.command("shadow-report")
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to the audit JSONL written by Shadow Mode ticks.",
+)
+@click.option(
+    "--bars",
+    "bars_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to a Closed Bar CSV covering the audit period plus horizon.",
+)
+@click.option(
+    "--symbol",
+    "symbol",
+    required=True,
+    help="Symbol to score (must match audit and CSV).",
+)
+@click.option(
+    "--timeframe",
+    "timeframe",
+    required=True,
+    help="Timeframe to score (must match audit and CSV).",
+)
+@click.option(
+    "--horizon",
+    "horizon_bars",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Number of bars after the decision used to score realised direction.",
+)
+def shadow_report(
+    audit_log_path: Path,
+    bars_path: Path,
+    symbol: str,
+    timeframe: str,
+    horizon_bars: int,
+) -> None:
+    """Score Shadow Mode decisions against subsequent realised direction."""
+    from .runtime import build_shadow_report
+
+    bars = load_closed_bars_csv(bars_path, symbol=symbol, timeframe=timeframe)
+    report = build_shadow_report(
+        audit_path=audit_log_path,
+        bars=bars,
+        horizon_bars=horizon_bars,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+
+
 def main() -> None:  # pragma: no cover -- thin wrapper
     cli()
 

@@ -361,7 +361,7 @@ class TickRunner:
                     (utcnow() - tick_started_at).total_seconds() * 1000.0,
                 )
 
-                self._audit_tick_success(trace_id, symbol, decision_bar, forecast, decision)
+                self._audit_tick_success(trace_id, symbol, decision_bar, forecast, decision, signal)
                 self._log.info(
                     "tick.success",
                     direction=signal.direction,
@@ -562,6 +562,7 @@ class TickRunner:
         decision_bar: Bar,
         forecast: Forecast,
         decision: RiskDecision,
+        signal: MetaSignal,
     ) -> None:
         self._audit.append(
             AuditRecord(
@@ -572,6 +573,7 @@ class TickRunner:
                     "timeframe": symbol.timeframe,
                     "decision_time": to_iso(decision_bar.open_time),
                     "forecast_direction": forecast.direction,
+                    "signal_direction": signal.direction,
                     "risk_approved": decision.approved,
                     "risk_rejected_by": decision.rejected_by,
                     "completed_at": to_iso(utcnow()),
