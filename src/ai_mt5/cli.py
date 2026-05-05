@@ -410,6 +410,75 @@ def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None
         sys.exit(1)
 
 
+@cli.command("reconcile")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--intent-log",
+    "intent_log_path",
+    type=click.Path(path_type=Path),
+    default=Path("data/state/intents.jsonl"),
+    show_default=True,
+    help="JSONL local intent ledger.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    type=click.Path(path_type=Path),
+    default=Path("data/audit/audit.jsonl"),
+    show_default=True,
+    help="JSONL audit trail to append the reconcile result to.",
+)
+def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path) -> None:
+    """Issue #5 — compare local intents to broker positions for the configured magic."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+
+    from .audit.trail import AuditRecord, JsonlAuditTrail
+    from .execution import BrokerPosition, LocalIntentLog, reconcile
+    from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
+
+    intent_log = LocalIntentLog(intent_log_path)
+    audit = JsonlAuditTrail(audit_log_path)
+    bridge_cfg = MT5BridgeConfig.from_env()
+    client = MT5Client(bridge_cfg)
+    try:
+        client.connect()
+    except MT5ConnectionError as exc:
+        click.echo(json.dumps({"ok": False, "error": f"bridge_error:{exc}"}, sort_keys=True))
+        sys.exit(1)
+    try:
+        broker_rows = client.positions()
+    finally:
+        client.disconnect()
+    broker_positions = [BrokerPosition.from_dict(row) for row in broker_rows]
+    report = reconcile(
+        local_intents=intent_log.open_intents(),
+        broker_positions=broker_positions,
+        magic=cfg.execution.magic,
+    )
+    audit.append(
+        AuditRecord(
+            kind="reconcile.report",
+            trace_id=f"reconcile:{int(datetime.now(UTC).timestamp())}",
+            payload=report.to_dict(),
+        )
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
 def main() -> None:  # pragma: no cover -- thin wrapper
     cli()
 
