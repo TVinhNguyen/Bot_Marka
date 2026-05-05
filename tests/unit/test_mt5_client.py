@@ -387,6 +387,53 @@ def test_connect_without_rpyc_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         client.connect()
 
 
+def test_connect_closes_rpyc_conn_when_initialize_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a partial connect() must not leak the RPyC socket.
+
+    When ``rpyc.classic.connect`` succeeds but ``MetaTrader5.initialize``
+    fails (terminal logged out, account locked, …), the underlying RPyC
+    channel must be closed before the exception leaves connect(). Repeated
+    health snapshots against a half-working bridge otherwise leak one
+    socket per snapshot.
+    """
+
+    class _FailingMT5:
+        def initialize(self, **_: Any) -> bool:
+            return False
+
+        def last_error(self) -> tuple[int, str]:
+            return (-1, "logged out")
+
+    closed: list[bool] = []
+
+    class _FakeRpycConn:
+        def __init__(self) -> None:
+            class _Modules:
+                MetaTrader5 = _FailingMT5()
+
+            self.modules = _Modules()
+
+        def close(self) -> None:
+            closed.append(True)
+
+    fake_conn = _FakeRpycConn()
+
+    class _FakeRpyc:
+        class classic:  # noqa: N801 - mirroring rpyc.classic
+            @staticmethod
+            def connect(_host: str, _port: int) -> _FakeRpycConn:
+                return fake_conn
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "rpyc", _FakeRpyc)
+    client = MT5Client(MT5BridgeConfig(host="bridge", port=12345))
+    with pytest.raises(MT5ConnectionError, match="initialize"):
+        client.connect()
+    assert closed == [True], "RPyC connection was not closed on initialize() failure"
+    assert not client.is_connected
+
+
 def test_environ_isolation_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """from_env should respect MT5_LOGIN / MT5_PASSWORD as fallbacks."""
     for k in (

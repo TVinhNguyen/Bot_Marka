@@ -164,21 +164,33 @@ class MT5Client:
                 f"cannot reach mt5linux bridge at {self._config.host}:{self._config.port}: {exc}"
             ) from exc
 
+        # Once self._conn is open, every failure path below MUST close it
+        # to avoid leaking sockets — repeated snapshot()/preflight() calls
+        # against a half-working bridge would otherwise pile up RPyC
+        # channels with no handle to clean them up.
         try:
-            mt5 = self._conn.modules.MetaTrader5
-        except Exception as exc:  # pragma: no cover - depends on remote env
-            raise MT5ConnectionError("remote bridge does not expose `MetaTrader5` module") from exc
+            try:
+                mt5 = self._conn.modules.MetaTrader5
+            except Exception as exc:  # pragma: no cover - depends on remote env
+                raise MT5ConnectionError(
+                    "remote bridge does not expose `MetaTrader5` module"
+                ) from exc
 
-        ok = mt5.initialize(
-            login=self._config.login,
-            password=self._config.password,
-            server=self._config.server,
-            timeout=self._config.timeout_ms,
-        )
-        if not ok:
-            err = mt5.last_error()
-            raise MT5ConnectionError(f"MT5 initialize() failed: {err}")
-        self._mt5 = mt5
+            ok = mt5.initialize(
+                login=self._config.login,
+                password=self._config.password,
+                server=self._config.server,
+                timeout=self._config.timeout_ms,
+            )
+            if not ok:
+                err = mt5.last_error()
+                raise MT5ConnectionError(f"MT5 initialize() failed: {err}")
+            self._mt5 = mt5
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self._conn.close()
+            self._conn = None
+            raise
         _log.info(
             "mt5.connect.ok",
             host=self._config.host,
