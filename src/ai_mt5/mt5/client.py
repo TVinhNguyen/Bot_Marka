@@ -256,8 +256,10 @@ class MT5Client:
         if rates is None:
             err = mt5.last_error()
             raise MT5ConnectionError(f"copy_rates_from_pos failed: {err}")
-        # Each row is a structured numpy record; coerce to plain dicts so
-        # the audit / store layers don't care about RPyC netrefs.
+        # Each row is a numpy.void (structured-array record). Access via
+        # ``row["field"]`` only — numpy.void does not support ``.get()``.
+        # MT5 always populates ``time``, ``open/high/low/close``,
+        # ``tick_volume`` and ``spread`` for the timeframes we use.
         return [
             {
                 "open_time": datetime.fromtimestamp(int(row["time"]), tz=UTC),
@@ -265,8 +267,8 @@ class MT5Client:
                 "high": float(row["high"]),
                 "low": float(row["low"]),
                 "close": float(row["close"]),
-                "volume": float(row.get("tick_volume", row.get("real_volume", 0.0))),
-                "spread_points": int(row.get("spread", 0)),
+                "volume": float(row["tick_volume"]),
+                "spread_points": int(row["spread"]),
             }
             for row in rates
         ]

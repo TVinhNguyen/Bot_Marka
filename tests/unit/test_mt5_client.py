@@ -200,6 +200,47 @@ def test_copy_rates_from_pos_returns_typed_dicts() -> None:
     assert bar["volume"] == 1234.0
 
 
+def test_copy_rates_works_with_numpy_structured_array() -> None:
+    """Regression: real MT5 returns numpy structured arrays whose rows are
+    ``numpy.void``. Those rows do NOT support ``.get()`` — only ``row["field"]``."""
+    import numpy as np
+
+    dtype = np.dtype(
+        [
+            ("time", "<i8"),
+            ("open", "<f8"),
+            ("high", "<f8"),
+            ("low", "<f8"),
+            ("close", "<f8"),
+            ("tick_volume", "<i8"),
+            ("spread", "<i4"),
+            ("real_volume", "<i8"),
+        ]
+    )
+    arr = np.array(
+        [
+            (
+                int(datetime(2026, 4, 30, 12, 0).timestamp()),
+                1.07,
+                1.071,
+                1.069,
+                1.0705,
+                4321,
+                15,
+                0,
+            )
+        ],
+        dtype=dtype,
+    )
+    fake = _FakeMT5()
+    fake.bars = arr  # Override with the real-shape numpy array.
+    client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)
+    bars = client.copy_rates_from_pos(symbol="EURUSD", timeframe="M15", start_pos=0, count=10)
+    assert len(bars) == 1
+    assert bars[0]["volume"] == 4321.0
+    assert bars[0]["spread_points"] == 15
+
+
 def test_copy_rates_unsupported_timeframe_raises() -> None:
     fake = _FakeMT5()
     client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)
