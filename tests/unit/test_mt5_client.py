@@ -161,6 +161,31 @@ def test_from_env_missing_host_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         MT5BridgeConfig.from_env()
 
 
+def test_from_env_invalid_port_raises_mt5_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a non-numeric MT5_BRIDGE_PORT must surface as
+    MT5ConnectionError so the CLI's try/except path produces structured
+    JSON instead of a raw ValueError traceback."""
+    monkeypatch.setenv("MT5_BRIDGE_HOST", "host")
+    monkeypatch.setenv("MT5_BRIDGE_PORT", "not-a-number")
+    with pytest.raises(MT5ConnectionError, match="MT5_BRIDGE_PORT"):
+        MT5BridgeConfig.from_env()
+
+
+def test_from_env_invalid_login_raises_mt5_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a non-numeric MT5_DEMO_LOGIN / MT5_LOGIN must surface
+    as MT5ConnectionError, not ValueError."""
+    monkeypatch.setenv("MT5_BRIDGE_HOST", "host")
+    for k in ("MT5_BRIDGE_PORT", "MT5_DEMO_LOGIN", "MT5_DEMO_PASSWORD", "MT5_DEMO_SERVER"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("MT5_LOGIN", "not-an-int")
+    with pytest.raises(MT5ConnectionError, match="MT5_DEMO_LOGIN"):
+        MT5BridgeConfig.from_env()
+
+
 def test_client_skips_connect_when_module_injected() -> None:
     fake = _FakeMT5()
     client = MT5Client(MT5BridgeConfig(host="localhost"), mt5_module=fake)

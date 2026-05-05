@@ -53,11 +53,26 @@ class MT5BridgeConfig:
         host = os.environ.get(f"{prefix}_BRIDGE_HOST")
         if not host:
             raise MT5ConnectionError(f"{prefix}_BRIDGE_HOST is not set in environment")
-        port = int(os.environ.get(f"{prefix}_BRIDGE_PORT", "18812"))
+        port_raw = os.environ.get(f"{prefix}_BRIDGE_PORT", "18812")
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            # Surface bad env values as MT5ConnectionError so the CLI's
+            # try/except path emits structured JSON instead of a raw
+            # Python traceback. ``ValueError`` is the only failure mode
+            # for ``int()`` we can hit on user-supplied env values.
+            raise MT5ConnectionError(
+                f"{prefix}_BRIDGE_PORT must be an integer, got {port_raw!r}"
+            ) from exc
         login_raw = os.environ.get(f"{prefix}_DEMO_LOGIN") or os.environ.get(f"{prefix}_LOGIN")
         password = os.environ.get(f"{prefix}_DEMO_PASSWORD") or os.environ.get(f"{prefix}_PASSWORD")
         server = os.environ.get(f"{prefix}_DEMO_SERVER") or os.environ.get(f"{prefix}_SERVER")
-        login = int(login_raw) if login_raw else None
+        try:
+            login = int(login_raw) if login_raw else None
+        except ValueError as exc:
+            raise MT5ConnectionError(
+                f"{prefix}_DEMO_LOGIN / {prefix}_LOGIN must be an integer, got {login_raw!r}"
+            ) from exc
         return cls(host=host, port=port, login=login, password=password, server=server)
 
 
