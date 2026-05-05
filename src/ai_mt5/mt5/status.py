@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from ..observability.health import MT5SnapshotData
 from ..utils.logging_setup import get_logger
-from .client import MT5Client, MT5ConnectionError
+from .client import MT5Client
 
 _log = get_logger("ai_mt5.mt5.status")
 
@@ -25,9 +25,13 @@ class MT5BridgeStatus:
         self._watch_symbol = watch_symbol
 
     def snapshot(self, *, now: datetime) -> MT5SnapshotData:
+        # MT5StatusProvider contract: MUST NOT raise. RPyC can throw
+        # EOFError / ConnectionResetError / OSError when the bridge
+        # drops mid-call, plus arbitrary remote-module errors, so we
+        # catch broadly and report failures via connected=False.
         try:
             self._client.connect()
-        except MT5ConnectionError as exc:
+        except Exception as exc:
             return MT5SnapshotData(
                 connected=False,
                 open_positions=0,
@@ -46,9 +50,9 @@ class MT5BridgeStatus:
                 connected=True,
                 open_positions=len(positions),
                 last_tick_at=last_tick_at,
-                detail=f"login={account.login} server={account.server}",
+                detail=f"login={getattr(account, 'login', '?')} server={getattr(account, 'server', '?')}",
             )
-        except MT5ConnectionError as exc:
+        except Exception as exc:
             _log.warning("mt5.status.snapshot_failed", error=str(exc))
             return MT5SnapshotData(
                 connected=False,
