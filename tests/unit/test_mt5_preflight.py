@@ -142,6 +142,26 @@ def test_preflight_passes_on_healthy_terminal(app_config: AppConfig) -> None:
     }
 
 
+def test_preflight_catches_rpyc_transport_error(app_config: AppConfig) -> None:
+    """Regression: RPyC transport errors (EOFError, ConnectionResetError,
+    OSError, TimeoutError) raised mid-call when the bridge drops do NOT
+    subclass MT5ConnectionError, so they would propagate as a raw Python
+    traceback. Preflight must catch these and surface them as a
+    bridge_transport_error failure so the operator CLI emits JSON."""
+    fake = _FakeMT5()
+
+    def _drop(*_args: Any, **_kwargs: Any) -> Any:
+        raise EOFError("RPyC connection reset by peer")
+
+    fake.copy_rates_from_pos = _drop  # type: ignore[method-assign]
+
+    report = run_preflight(client=_client(fake), config=app_config, now=_now())
+    assert not report.ok
+    assert any(f.startswith("bridge_transport_error:EOFError") for f in report.failures), (
+        report.failures
+    )
+
+
 def test_preflight_order_check_comment_respects_31_char_limit(
     app_config: AppConfig,
 ) -> None:

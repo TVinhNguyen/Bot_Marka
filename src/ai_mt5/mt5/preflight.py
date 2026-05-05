@@ -210,6 +210,12 @@ def run_preflight(
 
     except MT5ConnectionError as exc:
         failures.append(f"bridge_error:{exc}")
+    except (EOFError, ConnectionError, OSError, TimeoutError) as exc:
+        # RPyC transport errors when the bridge drops mid-call do NOT
+        # subclass MT5ConnectionError. Same pattern as MT5BridgeStatus
+        # (status.py) — surface them as a structured failure so the
+        # operator gets JSON instead of a raw traceback.
+        failures.append(f"bridge_transport_error:{type(exc).__name__}:{exc}")
 
     return PreflightReport(
         ok=not failures,
