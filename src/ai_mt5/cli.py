@@ -431,11 +431,14 @@ def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None
     "--audit-log",
     "audit_log_path",
     type=click.Path(path_type=Path),
-    default=Path("data/audit/audit.jsonl"),
-    show_default=True,
-    help="JSONL audit trail to append the reconcile result to.",
+    default=None,
+    help=(
+        "JSONL audit trail to append the reconcile result to. Defaults to "
+        "<config.storage.audit_path>/audit.jsonl so reconcile reports stay "
+        "visible to 'ai-mt5 report' and 'ai-mt5 health'."
+    ),
 )
-def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path) -> None:
+def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path | None) -> None:
     """Issue #5 — compare local intents to broker positions for the configured magic."""
     try:
         cfg = load_config(config_path)
@@ -449,10 +452,16 @@ def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path
     from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
 
     intent_log = LocalIntentLog(intent_log_path)
-    audit = JsonlAuditTrail(audit_log_path)
-    bridge_cfg = MT5BridgeConfig.from_env()
-    client = MT5Client(bridge_cfg)
+    # Default to the audit path resolved from config so reconcile records
+    # land in the same trail as 'ai-mt5 health' / 'ai-mt5 report' read.
+    resolved_audit_path = audit_log_path or Path(cfg.storage.audit_path) / "audit.jsonl"
+    audit = JsonlAuditTrail(resolved_audit_path)
+    # Both from_env() (missing MT5_BRIDGE_HOST etc.) and connect()
+    # raise MT5ConnectionError. Wrap both so operators / CI always see
+    # the same structured JSON failure shape.
     try:
+        bridge_cfg = MT5BridgeConfig.from_env()
+        client = MT5Client(bridge_cfg)
         client.connect()
     except MT5ConnectionError as exc:
         click.echo(json.dumps({"ok": False, "error": f"bridge_error:{exc}"}, sort_keys=True))
