@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Mode = Literal["dry_run", "demo", "live"]
+Mode = Literal["dev", "dry_run", "shadow", "demo", "staging", "small_live", "live"]
 StorageBackend = Literal["jsonl", "duckdb", "parquet", "postgres"]
 Timeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
