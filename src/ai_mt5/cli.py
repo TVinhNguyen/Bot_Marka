@@ -15,10 +15,12 @@ Both commands share the same logging configuration as the runtime tick.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -408,6 +410,219 @@ def mt5_preflight(config_path: Path, bar_count: int, test_volume: float) -> None
     click.echo(json.dumps(report.to_dict(), sort_keys=True))
     if not report.ok:
         sys.exit(1)
+
+
+@cli.command("reconcile")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config.",
+)
+@click.option(
+    "--intent-log",
+    "intent_log_path",
+    type=click.Path(path_type=Path),
+    default=Path("data/state/intents.jsonl"),
+    show_default=True,
+    help="JSONL local intent ledger.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "JSONL audit trail to append the reconcile result to. Defaults to "
+        "<config.storage.audit_path>/audit.jsonl so reconcile reports stay "
+        "visible to 'ai-mt5 report' and 'ai-mt5 health'."
+    ),
+)
+def reconcile_cmd(config_path: Path, intent_log_path: Path, audit_log_path: Path | None) -> None:
+    """Issue #5 — compare local intents to broker positions for the configured magic."""
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(f"config error: {exc}", err=True)
+        sys.exit(2)
+    configure_logging(cfg.environment.log_level)
+
+    from .audit.trail import AuditRecord, JsonlAuditTrail
+    from .execution import BrokerPosition, LocalIntentLog, reconcile
+    from .mt5 import MT5BridgeConfig, MT5Client, MT5ConnectionError
+
+    intent_log = LocalIntentLog(intent_log_path)
+    # Default to the audit path resolved from config so reconcile records
+    # land in the same trail as 'ai-mt5 health' / 'ai-mt5 report' read.
+    resolved_audit_path = audit_log_path or Path(cfg.storage.audit_path) / "audit.jsonl"
+    audit = JsonlAuditTrail(resolved_audit_path)
+    # Both from_env() (missing MT5_BRIDGE_HOST etc.) and connect()
+    # raise MT5ConnectionError. Wrap both so operators / CI always see
+    # the same structured JSON failure shape.
+    try:
+        bridge_cfg = MT5BridgeConfig.from_env()
+        client = MT5Client(bridge_cfg)
+        client.connect()
+    except MT5ConnectionError as exc:
+        click.echo(json.dumps({"ok": False, "error": f"bridge_error:{exc}"}, sort_keys=True))
+        sys.exit(1)
+    transport_error: Exception | None = None
+    broker_rows: list[dict[str, Any]] = []
+    try:
+        broker_rows = client.positions()
+    except (MT5ConnectionError, EOFError, ConnectionError, OSError, TimeoutError) as exc:
+        # RPyC transport errors (bridge drop mid-call) and
+        # MT5ConnectionError both need the same structured JSON shape
+        # the connect() handler above produces.
+        transport_error = exc
+    finally:
+        with contextlib.suppress(Exception):
+            client.disconnect()
+    if transport_error is not None:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"bridge_error:{type(transport_error).__name__}:{transport_error}",
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(1)
+    broker_positions = [BrokerPosition.from_dict(row) for row in broker_rows]
+    report = reconcile(
+        local_intents=intent_log.open_intents(),
+        broker_positions=broker_positions,
+        magic=cfg.execution.magic,
+    )
+    audit.append(
+        AuditRecord(
+            kind="reconcile.report",
+            trace_id=f"reconcile:{int(datetime.now(UTC).timestamp())}",
+            payload=report.to_dict(),
+        )
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
+@cli.command("promotion-check")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("config/config.yaml"),
+    show_default=True,
+    help="Path to the YAML config to validate.",
+)
+@click.option(
+    "--target",
+    "target",
+    type=click.Choice(["demo", "staging", "small_live"]),
+    required=True,
+    help="Mode the operator wants to promote to.",
+)
+@click.option(
+    "--reports-dir",
+    "reports_dir",
+    type=click.Path(path_type=Path),
+    default=Path("reports"),
+    show_default=True,
+    help="Directory holding backtest *.json reports.",
+)
+@click.option(
+    "--max-backtest-age-days",
+    "max_backtest_age_days",
+    type=int,
+    default=7,
+    show_default=True,
+)
+def promotion_check(
+    config_path: Path,
+    target: str,
+    reports_dir: Path,
+    max_backtest_age_days: int,
+) -> None:
+    """Run the promotion checklist for a target mode and emit JSON.
+
+    Exit code is 0 when every gate passes, 1 otherwise. The output is
+    a stable JSON object suitable for CI and operator dashboards.
+    """
+    from .runtime import RuntimeMode, run_promotion_checks
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        click.echo(json.dumps({"ok": False, "error": f"config_error:{exc}"}, sort_keys=True))
+        sys.exit(2)
+    report = run_promotion_checks(
+        config=cfg,
+        target=RuntimeMode(target),
+        backtest_reports_dir=reports_dir,
+        backtest_max_age_days=max_backtest_age_days,
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
+    if not report.ok:
+        sys.exit(1)
+
+
+@cli.command("shadow-report")
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to the audit JSONL written by Shadow Mode ticks.",
+)
+@click.option(
+    "--bars",
+    "bars_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to a Closed Bar CSV covering the audit period plus horizon.",
+)
+@click.option(
+    "--symbol",
+    "symbol",
+    required=True,
+    help="Symbol to score (must match audit and CSV).",
+)
+@click.option(
+    "--timeframe",
+    "timeframe",
+    required=True,
+    help="Timeframe to score (must match audit and CSV).",
+)
+@click.option(
+    "--horizon",
+    "horizon_bars",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Number of bars after the decision used to score realised direction.",
+)
+def shadow_report(
+    audit_log_path: Path,
+    bars_path: Path,
+    symbol: str,
+    timeframe: str,
+    horizon_bars: int,
+) -> None:
+    """Score Shadow Mode decisions against subsequent realised direction."""
+    from .runtime import build_shadow_report
+
+    bars = load_closed_bars_csv(bars_path, symbol=symbol, timeframe=timeframe)
+    report = build_shadow_report(
+        audit_path=audit_log_path,
+        bars=bars,
+        horizon_bars=horizon_bars,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+    click.echo(json.dumps(report.to_dict(), sort_keys=True))
 
 
 def main() -> None:  # pragma: no cover -- thin wrapper
